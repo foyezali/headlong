@@ -77,7 +77,7 @@ run_step() {  # $1 = trigger json
         PATH="$WORK/stub:$REPO/bin:$REPO/tools:$PATH" \
         IDENTITY_DIR="$ID" IDENTITY_NAME="$ME" MEM_DIR="$ID/memories" \
         TRAJ_DIR="$ID/trajectories" TRAJ_ID="$TRAJ_ID" HOME="$WORK/home" \
-        SHELLM_MODEL="stub-model" THINK_CONTEXT_TAIL=20 \
+        SHELLM_MODEL="stub-model" THINK_MODEL="stub-model" THINK_CONTEXT_TAIL=20 \
         RESPONDER_LOG_PROMPT="${LOG_PROMPT:-0}" RESPONDER_PERSON_NOTES=0 \
         "$STEP" >> "$WORK/step.log" 2>&1
 }

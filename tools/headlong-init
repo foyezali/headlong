@@ -108,7 +108,16 @@ if [[ "${HEADLONG_NO_TTY:-0}" == "1" ]]; then HAS_TTY=0; fi
 # (docker run -p 8080:8080) can reach it — localhost-only is unreachable
 # through a port mapping. Explicit HEADLONG_WEB_ARGS still wins.
 IN_CONTAINER=0
-[[ -f /.dockerenv || -f /run/.containerenv ]] && IN_CONTAINER=1
+# HEADLONG_CONTAINER=1|0 forces the answer either way. It exists because the
+# host that matters is not always the one this process runs in: the installer
+# tests run on a Docker host inside a container image, where /.dockerenv is true
+# but the install being exercised is a host install. HEADLONG_FAKE_CONTAINER=1
+# is the older one-way spelling and still works.
+case "${HEADLONG_CONTAINER:-}" in
+    1) IN_CONTAINER=1 ;;
+    0) IN_CONTAINER=0 ;;
+    *) [[ -f /.dockerenv || -f /run/.containerenv ]] && IN_CONTAINER=1 ;;
+esac
 [[ "${HEADLONG_FAKE_CONTAINER:-0}" == "1" ]] && IN_CONTAINER=1
 if [[ "$IN_CONTAINER" -eq 1 && -z "${HEADLONG_WEB_ARGS:-}" ]]; then
     HEADLONG_WEB_ARGS="--host 0.0.0.0"

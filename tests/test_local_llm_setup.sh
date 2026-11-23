@@ -158,7 +158,10 @@ LLM_ENV_CAPTURE="$WORK/llm_env"
 # run_init <home> [VAR=VAL ...] — headlong-init with no tty, no inherited
 # keys or local config, stubs first on PATH. Output to $WORK/out; the exit
 # code lands in $RC (captured immediately — a following check() call would
-# otherwise overwrite $?).
+# otherwise overwrite $?). HEADLONG_CONTAINER=0 is pinned because this suite
+# runs on a Docker host inside a container image: without it the installer
+# sees /.dockerenv and takes the container paths, so every host-install
+# check sees a host.docker.internal URL and fails.
 RC=0
 run_init() {
     local home="$1"; shift
@@ -170,7 +173,8 @@ run_init() {
         CURL_MODELS_FILE="$MODELS_FILE" CURL_MODELS_HITS="$CURL_MODELS_HITS" \
         CURL_MODELS_UP="${CURL_MODELS_UP:-1}" CURL_MODELS_STATUS="${CURL_MODELS_STATUS:-200}" \
         CURL_ARGS="$CURL_ARGS" CURL_AUTH_FILE="$CURL_AUTH_FILE" CURL_AUTH_MODE="$CURL_AUTH_MODE" \
-        LLM_STUB_RC="${LLM_STUB_RC:-0}" LLM_ENV_CAPTURE="${LLM_ENV_CAPTURE_ACTIVE:+$LLM_ENV_CAPTURE}" "$@" \
+        LLM_STUB_RC="${LLM_STUB_RC:-0}" LLM_ENV_CAPTURE="${LLM_ENV_CAPTURE_ACTIVE:+$LLM_ENV_CAPTURE}" \
+        HEADLONG_CONTAINER=0 "$@" \
         bash "$APP/tools/headlong-init" </dev/null > "$WORK/out" 2>&1
     RC=$?
 }
