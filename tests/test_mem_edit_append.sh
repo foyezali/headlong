@@ -84,5 +84,27 @@ printf '%s' "$out" | grep -q -- "--append" && ok "shrink warning names --append"
 out=$(mem edit "$id" --apply bogus 2>&1 >/dev/null)
 printf '%s' "$out" | grep -q "unknown option" && ok "unknown option refused" || bad "unknown option accepted" "$out"
 
+# ---------------------------------------------------------------------------
+# Flags may come before OR after the id. Before 2026-11-23 the dispatch read
+# `$1` as the name, so `mem edit --append <goal-id>` took "--append" as the
+# name, slugified it to "append", matched a memory whose slug contained
+# "append", and REPLACED that memory's body with the goal id. The goal was
+# never touched. Both orders must land on the goal, and no memory may be
+# renamed or clobbered.
+# ---------------------------------------------------------------------------
+printf 'a lesson about append parsing\n' | mem add --type memory >/dev/null 2>&1
+printf 'the real goal body\n' | mem add --type goal >/dev/null 2>&1
+lgid=$(for f in "$MEM_DIR"/*.md; do { grep -q '^type: goal' "$f" && sed -n 's/^id: //p' "$f"; } || true; done | tail -1)
+llid=$(for f in "$MEM_DIR"/*.md; do { grep -q 'a lesson about append' "$f" && sed -n 's/^id: //p' "$f"; } || true; done | tail -1)
+printf 'FLAG BEFORE ID\n' | mem edit --append "$lgid" >/dev/null 2>&1
+grep -q '^FLAG BEFORE ID$' "$MEM_DIR"/*_"$lgid"_*.md && ok "flag before id appends to the goal" || bad "flag before id missed the goal"
+grep -q '^the real goal body$' "$MEM_DIR"/*_"$lgid"_*.md && ok "flag before id kept the goal body" || bad "goal body lost"
+grep -q 'a lesson about append parsing' "$MEM_DIR"/*_"$llid"_*.md && ok "the lookalike memory is untouched" || bad "lookalike memory clobbered"
+[[ "$(basename "$(ls "$MEM_DIR"/*_"$llid"_*.md)")" == *"_${llid}_a-lesson-about-append-parsing.md" ]] && ok "lookalike kept its filename" || bad "lookalike renamed" "$(basename "$(ls "$MEM_DIR"/*_"$llid"_*.md)")"
+printf 'FLAG AFTER ID\n' | mem edit "$lgid" --append >/dev/null 2>&1
+grep -q '^FLAG AFTER ID$' "$MEM_DIR"/*_"$lgid"_*.md && ok "flag after id appends to the goal" || bad "flag after id missed the goal"
+out=$(printf 'x\n' | mem edit --append 2>&1 >/dev/null)
+printf '%s' "$out" | grep -q "Usage: mem edit" && ok "a missing id is a usage error" || bad "missing id accepted" "$out"
+
 printf "\n%d passed, %d failed\n" "$pass" "$fail"
 [[ $fail -eq 0 ]]

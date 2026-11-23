@@ -626,31 +626,37 @@ action_forget() {
 }
 
 action_edit() {
-    local name="$1"; shift
-    local file
-    file=$(find_memory "$name")
-
+    # Flags may come before or after the id. Parsing them first, and taking the
+    # first non-flag as the name, is what keeps a flag from being read as a
+    # memory name: on 2026-11-23 `mem edit --append <id>` took "--append" as the
+    # name, slugified to "append", substring-matched a memory whose slug
+    # contained that word, and replaced that memory's body with the id. A dash
+    # token is never a name.
     local slug=""
     local append=0
-    # Parse --slug and --append. --append exists because replacing the whole
-    # body is destructive and rarely what a long memory needs: adding a section
-    # to a goal cost the whole 16 KB body on 2026-11-23, and the warning added
-    # then only says so after the fact. Flags come before the text.
+    local name=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --slug) slug="${2:?--slug requires TEXT}"; shift 2 ;;
             --append) append=1; shift ;;
-            *) break ;;
+            -*) die "edit: unknown option '$1'. mem edit takes only --slug and --append, then the id and text:
+  mem edit <id> [--slug SLUG] [--append] <text>      (or the text on stdin)" ;;
+            *) if [[ -z "$name" ]]; then name="$1"; shift; else break; fi ;;
         esac
     done
+    [[ -n "$name" ]] || die "Usage: mem edit <id> [--slug SLUG] [--append] [text]"
+
+    local file
+    file=$(find_memory "$name")
 
     # A flag mem edit does not know must not become the body: three times
     # (2026-09-24 19:39Z, 2026-09-25 15:41Z, 2026-09-26 00:04Z) a body meant
     # to follow --apply ran as `mem edit <id> --apply <body>` and the bare
-    # --apply token silently became the whole memory, exit 0. Same guard as
-    # mem add (PR 134): text that truly starts with a dash goes on stdin.
+    # --apply token silently became the whole memory, exit 0. The flag loop
+    # above catches a leading one; this catches one after the id. Text that
+    # truly starts with a dash goes on stdin.
     if [[ "${1:-}" == -* ]]; then
-        die "edit: unknown option '$1'. mem edit takes only --slug and --append, then the text:
+        die "edit: unknown option '$1'. mem edit takes only --slug and --append, then the id and text:
   mem edit <id> [--slug SLUG] [--append] <text>      (or the text on stdin)"
     fi
 
@@ -925,9 +931,8 @@ main() {
             action_forget "$1"
             ;;
         edit)
-            [[ $# -lt 1 ]] && die "Usage: mem edit <id> [--slug SLUG] [text]"
-            local name="$1"; shift
-            action_edit "$name" "$@"
+            [[ $# -lt 1 ]] && die "Usage: mem edit <id> [--slug SLUG] [--append] [text]"
+            action_edit "$@"
             ;;
         "")
             usage
