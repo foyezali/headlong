@@ -68,6 +68,11 @@ if (: </dev/tty) 2>/dev/null; then HAS_TTY=1; fi
 ask_yn() {
     local prompt="$1" def="$2" reply=""
     [[ "$YES" -eq 1 ]] && return 0
+    # A dry run changes nothing, so there is nothing to decide: never prompt,
+    # take the default. Without this the identities "ask" branch below opened
+    # an interactive prompt during --dry-run and blocked forever when the
+    # caller had a terminal (seen in tests/test_uninstall.sh run under tmux).
+    [[ "$DRY_RUN" -eq 1 ]] && { [[ "$def" == y ]]; return; }
     if [[ "$HAS_TTY" -eq 0 ]]; then
         [[ "$def" == y ]]; return
     fi

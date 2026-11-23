@@ -68,7 +68,12 @@ check "fixture: identity"                test -d "$H1/.headlong/app/.identities/
 
 run_uninstall() {  # run_uninstall <home> args...
     local home="$1"; shift
-    HOME="$home" HEADLONG_HOME="$home/.headlong" PREFIX="$home/.local/bin" bash "$REPO/uninstall.sh" "$@"
+    # setsid: run without a controlling terminal, so uninstall.sh's HAS_TTY is
+    # 0 and the no-terminal paths are what get exercised. Inherited, a caller
+    # with a tty (a tmux pane, a CI runner) made --dry-run sit on an
+    # interactive prompt forever: three full suites hung here for 87 minutes.
+    HOME="$home" HEADLONG_HOME="$home/.headlong" PREFIX="$home/.local/bin" \
+        setsid --wait bash "$REPO/uninstall.sh" "$@"
 }
 
 # --- 1. dry run --------------------------------------------------------------
