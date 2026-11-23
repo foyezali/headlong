@@ -35,7 +35,19 @@ DASH_PAT='(uv run --project [^ ]+ |/\.venv/bin/)(headlong|shellm|shelly)-web( |$
 
 say()   { printf '%s\n' "$*"; }
 head_() { printf '\n==> %s\n' "$*"; }
-alive() { [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
+alive() {
+    # kill -0 is true for a zombie; check the state too so a defunct process
+    # is not reported as running.
+    local p="${1:-}" line=""
+    [[ -n "$p" ]] || return 1
+    kill -0 "$p" 2>/dev/null || return 1
+    if [[ -r "/proc/$p/stat" ]]; then
+        read -r line < "/proc/$p/stat" 2>/dev/null || return 0
+        line="${line##*') '}"
+        [[ "${line%% *}" == "Z" ]] && return 1
+    fi
+    return 0
+}
 
 case "${1:-}" in
     -h|--help) sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;

@@ -65,6 +65,21 @@ while :; do
     protected="${protected}${_p} "
 done
 
+_pid_alive() {
+    # kill -0 succeeds on a zombie, so liveness must also look at the process
+    # state: a defunct child that has not been reaped yet is dead, not a
+    # survivor. /proc/<pid>/stat is "pid (comm) STATE ..." and comm may contain
+    # ")", so strip through the LAST ") " before reading the state.
+    local _pid="$1" _line=""
+    kill -0 "$_pid" 2>/dev/null || return 1
+    if [[ -r "/proc/$_pid/stat" ]]; then
+        read -r _line < "/proc/$_pid/stat" 2>/dev/null || return 0
+        _line="${_line##*') '}"
+        [[ "${_line%% *}" == "Z" ]] && return 1
+    fi
+    return 0
+}
+
 in_list() {  # in_list <pid> <list-string>
     [[ "$2" == *" $1 "* ]]
 }
@@ -124,7 +139,7 @@ if [[ "$DRY_RUN" -eq 0 && "${#pids[@]}" -gt 0 ]]; then
     for _ in 1 2 3 4 5 6; do
         survivors=()
         for pid in "${pids[@]}"; do
-            kill -0 "$pid" 2>/dev/null && survivors+=("$pid")
+            _pid_alive "$pid" && survivors+=("$pid")
         done
         [[ "${#survivors[@]}" -eq 0 ]] && break
         sleep 0.5

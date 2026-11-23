@@ -178,7 +178,19 @@ _kill_processes() {
     # Whatever killall did not know about (the dash on old checkouts), plus
     # stragglers: TERM, a moment, KILL.
     local alive=""
-    local p; for p in $pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+    # kill -0 is true for a zombie, so read the state too; a defunct process
+    # needs no further TERM/KILL.
+    local p line state
+    for p in $pids; do
+        kill -0 "$p" 2>/dev/null || continue
+        state=""
+        if [[ -r "/proc/$p/stat" ]]; then
+            read -r line < "/proc/$p/stat" 2>/dev/null && \
+                { line="${line##*') '}"; state="${line%% *}"; }
+        fi
+        [[ "$state" == "Z" ]] && continue
+        alive="$alive $p"
+    done
     [[ -n "$alive" ]] || return 0
     # shellcheck disable=SC2086
     kill -TERM $alive 2>/dev/null || true
