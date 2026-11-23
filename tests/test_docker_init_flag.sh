@@ -42,5 +42,14 @@ for f in README.md docs/install.md install.sh; do
     fi
 done
 
+# --init only takes effect when a container is created, so an agent installed
+# by an older command keeps its non-reaping pid 1 until it is recreated. The
+# docs must say so, or the fix looks complete while existing installs rot.
+if grep -qi 'recreate' "$REPO/docs/install.md"; then
+    ok "docs/install.md says an existing container must be recreated"
+else
+    bad "docs/install.md does not say an existing container must be recreated"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

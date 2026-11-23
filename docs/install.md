@@ -126,6 +126,14 @@ back to it.
 For a throwaway sandbox instead, drop `--name` and `--restart` and add
 `--rm`. Exiting the shell then deletes everything.
 
+Existing containers need one hand. `--init` only takes effect when the
+container is created, so an agent installed by an older command keeps
+running without a reaping pid 1, and every short lived child that gets
+orphaned stays behind as a zombie. If `ps` inside the container shows a
+growing pile of `Z` rows, recreate it with the command above; the identity
+and key live in the container's own data, so bring them along before you
+`docker rm -f headlong`.
+
 ## Non-interactive install (CI and coding agents)
 
 With no tty, every question falls back to an environment variable or a
