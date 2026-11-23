@@ -56,8 +56,14 @@ export SHELLM_MODEL="test-model"
 export SHELLM_ENV=local
 export LLM_STUB_DIR="$WORK/msgs"
 
+# bin/shellm honours an inherited TRAJ_DIR/TRAJ_ID over the sandboxed HOME, so a
+# run started from inside a mind would resolve --resume against that mind's own
+# live trajectory (observed: the third run here came back holding the caller's
+# 10,000-step log). The fixture owns its HOME, so it must own the trajectory too.
 run_shellm() {
-    ( cd "$WORK/wd" && "$WORK/toolbin/shellm" --workdir "$WORK/wd" --max-iterations 1 "$@" ) \
+    ( cd "$WORK/wd" && env -u TRAJ_DIR -u TRAJ_ID -u ROOT_TRAJ_ID -u SHELLM_TRAJ_DIR \
+        -u _SHELLM_PARENT_TRAJ_ID \
+        "$WORK/toolbin/shellm" --workdir "$WORK/wd" --max-iterations 1 "$@" ) \
         > "$WORK/out" 2> "$WORK/err" < /dev/null
 }
 
