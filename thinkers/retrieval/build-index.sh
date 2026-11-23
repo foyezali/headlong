@@ -26,4 +26,8 @@ for f in "$mem_dir"/*.md; do
         | awk -v m="$mid" -v s="$summary" '{print $0 "\t" m "\t" s}' >> "$tmp" || true
 done
 sort -u "$tmp" > "$out"
+# The distinct id set, beside the index. thinkers/retrieval/step compares this
+# against the memory files to notice a deletion or a rename, which no file
+# mtime can reveal.
+cut -f2 "$out" | sort -u > "$out.ids"
 wc -l < "$out" | tr -d ' '

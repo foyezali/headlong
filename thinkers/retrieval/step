@@ -40,21 +40,35 @@ step_source=$(printf '%s' "$step_json" | jq -r '.source // empty' 2>/dev/null) |
 step_id=$(printf '%s' "$step_json" | jq -r '.step_id // empty' 2>/dev/null) || true
 [[ -z "$content" || "$step_source" == "$THINKER_NAME" ]] && exit 0
 
-# Index missing or older than the newest memory: rebuild (a few ms per memory).
+# Rebuild the index (a few ms per memory) when it is missing, when a memory is
+# newer than it (an edit or a new memory), or when the SET of memory ids has
+# changed. The mtime test alone cannot see a deletion: remove a memory and every
+# surviving file is older than the index, so the index keeps serving the deleted
+# memory's words forever and the step keeps surfacing an id that no longer
+# exists (`mem show` cannot resolve it). build-index.sh writes the id set next to
+# the index for exactly this check; comparing sets rather than counts means a
+# rename (one id out, one in) is caught too.
+ids_now=$(awk 'FNR == 1 { done = 0 }
+    !done && /^id:[[:space:]]*[^[:space:]]/ {
+        sub(/^id:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; done = 1
+    }' "$MEM_DIR"/*.md 2>/dev/null | sort -u) || ids_now=""
+[[ -n "$ids_now" ]] || exit 0
 newest=$(ls -t "$MEM_DIR"/*.md 2>/dev/null | head -1) || true
-[[ -n "$newest" ]] || exit 0
-if [[ ! -s "$INDEX" || "$newest" -nt "$INDEX" ]]; then
+if [[ ! -s "$INDEX" || "$newest" -nt "$INDEX" || "$ids_now" != "$(cat "$INDEX.ids" 2>/dev/null)" ]]; then
     "$SCRIPT_DIR/build-index.sh" "$MEM_DIR" "$INDEX" >/dev/null 2>&1 || exit 0
 fi
 
 # Words of the step (lowercase, 3+ chars, stopwords out), then the memory
 # that shares the most of them with the step. Index rows: word, id, summary.
+# Ties break on the id, not on awk's hash order: without that, two memories
+# sharing the same top count surface interchangeably from one run to the next,
+# and whichever lost the tie gets suppressed by the seen list for nothing.
 words=$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' \
     | grep -E '^[a-z0-9]{3,}$' | grep -vxF -f "$SCRIPT_DIR/stopwords" | sort -u) || true
 [[ -n "$words" ]] || exit 0
 best=$(awk -F'\t' 'NR==FNR {w[$1]=1; next} ($1 in w) {n[$2]++; s[$2]=$3}
     END {for (m in n) print n[m] "\t" m "\t" s[m]}' <(printf '%s\n' "$words") "$INDEX" \
-    | sort -rn | head -1) || true
+    | sort -k1,1nr -k2,2 | head -1) || true
 IFS=$'\t' read -r hits mid summary <<<"$best"
 [[ -n "${mid:-}" && "${hits:-0}" -ge "${RETRIEVAL_MIN_HITS:-2}" ]] || exit 0
 

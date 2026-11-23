@@ -90,6 +90,62 @@ step thought 7 "the snap aws cli wrote an empty file again after the redirect" |
 check "index rebuilt: new memory surfaces"  bash -c 'grep "\"source\":\"retrieval\"" "$1" | tail -1 | jq -e ".retrieved_mem == \"cccc3333\"" >/dev/null' _ "$TRAJ"
 check "three observations total"            test "$(obs_count)" = 3
 
+# --- a deleted memory must stop surfacing ----------------------------------
+# The index is rebuilt when a memory file is newer than it. A deletion makes
+# every surviving file OLDER than the index, so an mtime test alone leaves the
+# deleted memory's words in place and the step keeps surfacing an id that no
+# longer resolves. The id set build-index.sh writes beside the index is what
+# catches it.
+# The seen list is cleared first, or the check would pass for the wrong reason:
+# cccc3333 surfaced a moment ago and would be suppressed as "still fresh"
+# whether or not the index still knows about it.
+rm -f "$ID/memories/20260803_cccc_snap.md" "$ID/retrieval/seen"
+step thought 9 "the snap aws cli wrote an empty file again after the redirect" | run_step
+check "deleted memory does not surface"     test "$(obs_count)" = 3
+check "deleted id gone from the index"      bash -c '! cut -f2 "$1" | grep -qx cccc3333' _ "$ID/retrieval/index.tsv"
+check "the id set exists"                   test -s "$ID/retrieval/index.tsv.ids"
+check "deleted id gone from the id set"     bash -c '! grep -qx cccc3333 "$1"' _ "$ID/retrieval/index.tsv.ids"
+check "surviving ids still in the id set"   bash -c 'grep -qx aaaa1111 "$1" && grep -qx bbbb2222 "$1"' _ "$ID/retrieval/index.tsv.ids"
+
+# --- an edit still rebuilds (the older path, kept honest) -------------------
+# The seen list is cleared first: bbbb2222 surfaced earlier in this run, and a
+# recently surfaced memory is suppressed on purpose.
+sleep 1
+rm -f "$ID/retrieval/seen"
+mem_file 20260802_bbbb_pager "bbbb2222" "short git output vanishes in the pager" \
+    "The LESS variable lacks -X, so paged git output disappears. Also the docker colima mount note applies."
+step thought 10 "colima docker mount and the pager both bite me" | run_step
+check "edited memory still surfaces"        bash -c 'grep "\"source\":\"retrieval\"" "$1" | tail -1 | jq -e ".retrieved_mem == \"bbbb2222\"" >/dev/null' _ "$TRAJ"
+check "four observations total"             test "$(obs_count)" = 4
+
+# --- a tie between two memories is decided the same way every time ---------
+# awk walks its own hash order, so an unbroken tie used to surface whichever
+# memory it happened to emit first, run after run, and the loser got suppressed
+# by the seen list for nothing.
+ID2="$WORK/ident2"
+mkdir -p "$ID2/memories" "$ID2/trajectories/$TRAJ_ID"
+printf 'name=testid2\ncreated=test\nroot_trajectory=%s\n' "$TRAJ_ID" > "$ID2/info.txt"
+: > "$ID2/trajectories/$TRAJ_ID/trajectory.jsonl"
+for pair in "aaaa1111:alpha" "ffff9999:zulu"; do
+    mid=${pair%%:*}; name=${pair##*:}
+    printf -- '---\nid: %s\nsummary: %s memory\ntype: fact\n---\nshares exactly the words zebra quokka and nothing else\n' \
+        "$mid" "$name" > "$ID2/memories/$name.md"
+done
+run_step2() {
+    env IDENTITY_DIR="$ID2" IDENTITY_NAME=testid2 MEM_DIR="$ID2/memories" \
+        TRAJ_DIR="$ID2/trajectories" TRAJ_ID="$TRAJ_ID" SKILLS_DIR="$ID2/skills" \
+        SKILLS_KERNEL_DIR="$ID2/kernel" HOME="$WORK/home" "$STEP"
+}
+tie=""
+for i in 1 2 3 4 5; do
+    rm -f "$ID2/retrieval/seen" "$ID2/retrieval/index.tsv" "$ID2/retrieval/index.tsv.ids"
+    step thought "tie-$i" "zebra quokka" | run_step2
+    this=$(grep '"source":"retrieval"' "$ID2/trajectories/$TRAJ_ID/trajectory.jsonl" | tail -1 | jq -r '.retrieved_mem // empty')
+    [[ -z "$tie" ]] && tie="$this"
+    [[ "$this" == "$tie" ]] || tie="unstable"
+done
+check "a tie always picks the same memory"  test "$tie" = "aaaa1111"
+
 # --- build-index.sh standalone ---------------------------------------------
 rows=$(MEM_DIR="$ID/memories" IDENTITY_DIR="$ID" "$REPO/thinkers/retrieval/build-index.sh" "$ID/memories" "$WORK/idx.tsv")
 check "build-index prints row count"        test "$rows" = "$(wc -l < "$WORK/idx.tsv" | tr -d ' ')"
@@ -98,7 +154,7 @@ check "build-index skips stopwords"         bash -c '! cut -f1 "$1" | grep -qx "
 # --- no memories: quiet no-op ----------------------------------------------
 rm -f "$ID/memories"/*.md
 step thought 8 "colima docker mount" | run_step
-check "no memories: exits 0, no append"     test "$(obs_count)" = 3
+check "no memories: exits 0, no append"     test "$(obs_count)" = 4
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
