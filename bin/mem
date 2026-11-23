@@ -446,9 +446,42 @@ action_search() {
         _bound_dir=$(mktemp -d "${TMPDIR:-/tmp}/mem-search-bound.XXXXXX") || return 1
         _bound_mark="$_bound_dir/deadline"
     fi
+    # Cancel a search child's whole tree. With job control on, `cmd &` puts the
+    # child in a process group led by its own pid, so a group kill is exactly
+    # its tree, and that stays the cheap path. But leadership is an assumption
+    # and it used to go unchecked: if `set -m` does not take effect, the child
+    # shares the caller's group. Measured on a copy of this file with its
+    # `set -m` lines stripped, a search bounded at 3s ran the full 41s, never
+    # fired its deadline, and then reported "the model returned no answer
+    # text" -- blaming the model for a bound that silently did not happen.
+    # So: keep the group kill when the child really leads its group, and walk
+    # the tree by parent pid when it does not.
+    _kill_search_tree() {
+        local pid="$1" c
+        [[ -n "$pid" ]] || return 0
+        for c in $(ps -o pid= --ppid "$pid" 2>/dev/null || true); do
+            _kill_search_tree "$c"
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    }
+    _kill_search_group() {
+        local pid="$1" pgid=""
+        [[ -n "$pid" ]] || return 0
+        # set -euo pipefail is in force here, and ps exits nonzero for a pid
+        # that is already gone or a zombie. Unguarded, this assignment aborts
+        # the whole search mid-cleanup: measured a wedged call ending at 1s
+        # with rc=1 where the deadline's 124 belonged.
+        pgid=$(ps -o pgid= -p "$pid" 2>/dev/null || true)
+        pgid=${pgid//[[:space:]]/}
+        if [[ -n "$pgid" && "$pgid" = "$pid" ]]; then
+            kill -KILL -- "-$pid" 2>/dev/null || true
+        else
+            _kill_search_tree "$pid"
+        fi
+    }
     _stop_search_bound() {
         if [[ -n "$_bound_pid" ]]; then
-            kill -KILL -- "-$_bound_pid" 2>/dev/null || true
+            _kill_search_group "$_bound_pid"
             wait "$_bound_pid" 2>/dev/null || true
         fi
     }
@@ -462,7 +495,7 @@ action_search() {
         trap '' TERM INT
         _stop_search_bound
         if [[ -n "$worker" ]]; then
-            kill -KILL -- "-$worker" 2>/dev/null || true
+            _kill_search_group "$worker"
             wait "$worker" 2>/dev/null || true
         fi
         _remove_search_bound
@@ -482,9 +515,9 @@ action_search() {
         set -m
         (
             sleep "$t"
-            kill -0 -- "-$worker" 2>/dev/null || exit 0
+            kill -0 "$worker" 2>/dev/null || exit 0
             : > "$_bound_mark"
-            kill -KILL -- "-$worker" 2>/dev/null || true
+            _kill_search_group "$worker"
         ) >/dev/null 2>&1 </dev/null & _bound_pid=$!
         set +m
     fi
@@ -494,7 +527,7 @@ action_search() {
     if [[ -n "$_bound_mark" && -f "$_bound_mark" ]]; then
         # The leader can exit between the mark and the signal. Stopping the
         # watchdog must not skip cancellation of surviving group members.
-        kill -KILL -- "-$worker" 2>/dev/null || true
+        _kill_search_group "$worker"
         # A mark with rc 0 can race a successful completion.
         if [[ "$rc" -ne 0 ]]; then
             rc=124
