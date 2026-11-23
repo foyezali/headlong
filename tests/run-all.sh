@@ -24,7 +24,8 @@ set -uo pipefail
 # values, so the suite itself needs none of these.
 unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR \
       TRAJ_ID TRAJ_DIR ROOT_TRAJ_ID SHELLM_TRAJ_DIR _SHELLM_PARENT_TRAJ_ID \
-      SHELLM_HOME SHELLM_CONF_DIR
+      SHELLM_HOME SHELLM_CONF_DIR \
+      SHELLM_MODEL THINK_MODEL LLM_MODEL
 
 # TMPDIR is the same kind of caller leak: tests create their scratch with
 # `mktemp -d`, which honors TMPDIR, so a suite launched from a wrapper that

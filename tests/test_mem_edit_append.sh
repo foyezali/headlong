@@ -94,7 +94,7 @@ printf '%s' "$out" | grep -q "unknown option" && ok "unknown option refused" || 
 # ---------------------------------------------------------------------------
 printf 'a lesson about append parsing\n' | mem add --type memory >/dev/null 2>&1
 printf 'the real goal body\n' | mem add --type goal >/dev/null 2>&1
-lgid=$(for f in "$MEM_DIR"/*.md; do { grep -q '^type: goal' "$f" && sed -n 's/^id: //p' "$f"; } || true; done | tail -1)
+lgid=$(for f in "$MEM_DIR"/*.md; do { grep -q '^the real goal body$' "$f" && sed -n 's/^id: //p' "$f"; } || true; done | tail -1)
 llid=$(for f in "$MEM_DIR"/*.md; do { grep -q 'a lesson about append' "$f" && sed -n 's/^id: //p' "$f"; } || true; done | tail -1)
 printf 'FLAG BEFORE ID\n' | mem edit --append "$lgid" >/dev/null 2>&1
 grep -q '^FLAG BEFORE ID$' "$MEM_DIR"/*_"$lgid"_*.md && ok "flag before id appends to the goal" || bad "flag before id missed the goal"

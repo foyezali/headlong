@@ -21,6 +21,12 @@
 
 set -uo pipefail
 
+# The caller must not decide what this suite tests. tools/persona's _load_env
+# skips a key that is already in the environment, so an inherited SHELLM_MODEL
+# (true for any shell started from an activated identity) makes the report show
+# the caller's model instead of the one this test writes into its fake .env.
+unset SHELLM_MODEL THINK_MODEL LLM_MODEL
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"
 
