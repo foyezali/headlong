@@ -581,3 +581,96 @@ def test_run_stops_while_trajectory_is_unreadable(tmp_path, monkeypatch):
     monkeypatch.setattr(outbound.mindlog, "find_trajectory", find_trajectory)
     monkeypatch.setattr(outbound, "RETRY_SECS", 0.01)
     outbound.run(_cfg(tmp_path), object(), object(), stop)
+
+
+# --- one retry for a send that never reached Telegram ------------------------
+
+import httpx
+
+from headlong_telegram.api import ApiError
+
+
+def _retry_now(monkeypatch):
+    monkeypatch.setattr(outbound, "RETRY_SEND_SECS", 0.0)
+
+
+class FlakyConnect(Bot):
+    """Fails the first send with a connection error, then behaves."""
+
+    def __init__(self, exc=None, failures=1):
+        super().__init__()
+        self.attempts = 0
+        self.exc = exc or httpx.ConnectError("Connection reset by peer")
+        self.failures = failures
+
+    def send_message(self, chat, text, html=False):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise self.exc
+        self.sent.append(text)
+
+
+def test_connect_error_before_send_is_retried_once(tmp_path, monkeypatch, notices):
+    """2026-11-23: a TLS handshake reset at 15:26 lost a message because the
+    send path tried exactly once. A connection that never came up is safe to
+    repeat, so the message now goes out on the second attempt."""
+    _retry_now(monkeypatch)
+    bot = FlakyConnect()
+    _drive(tmp_path, monkeypatch, [_msg("m1", "telegram-1-1", "hello")], bot)
+    assert bot.attempts == 2
+    assert bot.sent == ["hello"]
+    assert notices[0]["status"] == "delivered"
+
+
+def test_connect_error_twice_is_a_failed_notice(tmp_path, monkeypatch, notices):
+    _retry_now(monkeypatch)
+    bot = FlakyConnect(failures=2)
+    _drive(tmp_path, monkeypatch, [_msg("m1", "telegram-1-1", "hello")], bot)
+    assert bot.attempts == 2, "exactly one retry, never a loop"
+    assert bot.sent == []
+    assert notices[0]["status"] == "failed" and "ConnectError" in notices[0]["reason"]
+
+
+def test_read_error_is_not_retried(tmp_path, monkeypatch, notices):
+    """A read timeout or protocol error can fire after Telegram accepted the
+    message, and sendMessage is not idempotent, so those are recorded failed
+    rather than repeated."""
+    _retry_now(monkeypatch)
+    bot = FlakyConnect(exc=httpx.ReadTimeout("timed out"))
+    _drive(tmp_path, monkeypatch, [_msg("m1", "telegram-1-1", "hello")], bot)
+    assert bot.attempts == 1
+    assert bot.sent == []
+    assert notices[0]["status"] == "failed" and "ReadTimeout" in notices[0]["reason"]
+
+
+def test_file_send_retries_a_connect_error(tmp_path, monkeypatch, notices):
+    _retry_now(monkeypatch)
+    docs = []
+    attempts = {"n": 0}
+
+    class DocBot:
+        def send_message(self, chat, text, html=False):
+            raise AssertionError("file step should not send text")
+
+        def send_document(self, chat, content, filename, caption=None):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise httpx.ConnectTimeout("connect timed out")
+            docs.append(filename)
+
+    steps = [
+        {"type": "message", "from": "audel", "to": "telegram-1-1",
+         "source": "chat", "filename": "note.txt", "content": "hi",
+         "step_id": "ddd"},
+    ]
+    monkeypatch.setattr(outbound.mindlog, "find_trajectory", lambda d: tmp_path / "t.jsonl")
+    monkeypatch.setattr(outbound.mindlog, "follow", lambda *a, **k: iter(steps))
+
+    class ApproveAll:
+        def is_approved(self, user):
+            return True
+
+    outbound.run(_cfg(tmp_path), DocBot(), ApproveAll(), threading.Event())
+    assert attempts["n"] == 2
+    assert docs == ["note.txt"]
+    assert notices[0]["status"] == "delivered"

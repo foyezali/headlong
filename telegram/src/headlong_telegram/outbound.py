@@ -136,8 +136,36 @@ def _exc_reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:200]
 
 
+def _send(fn, *args, **kwargs):
+    """Call a Bot send method, retrying once if the link never came up.
+
+    Only pre-send failures qualify (see RETRY_SEND_ERRORS), so a blip during
+    the TLS handshake costs a two second pause instead of the message. A
+    failure that may have reached Telegram is raised untouched and recorded
+    as failed, never repeated.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except RETRY_SEND_ERRORS as exc:
+        log.warning(
+            "send failed before reaching Telegram (%s); retrying once in %ss",
+            _exc_reason(exc), RETRY_SEND_SECS,
+        )
+        time.sleep(RETRY_SEND_SECS)
+        return fn(*args, **kwargs)
+
+
 # Seconds between attempts to reopen the trajectory after an OSError.
 RETRY_SECS = 30.0
+
+# A send whose connection never came up can be repeated safely: the request
+# did not reach Telegram, so a retry cannot post the same message twice.
+# httpx.ConnectError covers a reset during the TLS handshake, a refused
+# connection and ConnectTimeout (its subclass). Read timeouts and protocol
+# errors are deliberately absent: those fire after the request was written,
+# may already have been accepted, and sendMessage is not idempotent.
+RETRY_SEND_SECS = 2.0
+RETRY_SEND_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
 
 def run(cfg: Config, bot: Bot, allowlist: Allowlist, stop_event: threading.Event) -> None:
@@ -230,15 +258,15 @@ def _deliver(
                 try:
                     if payload.get("as_photo") and hasattr(bot, "send_photo"):
                         try:
-                            bot.send_photo(conv.chat, data, name, caption=caption)
+                            _send(bot.send_photo, conv.chat, data, name, caption=caption)
                             sent_file = True
                         except ApiError:
                             if not hasattr(bot, "send_document"):
                                 raise
-                            bot.send_document(conv.chat, data, name, caption=caption)
+                            _send(bot.send_document, conv.chat, data, name, caption=caption)
                             sent_file = True
                     elif hasattr(bot, "send_document"):
-                        bot.send_document(conv.chat, data, name, caption=caption)
+                        _send(bot.send_document, conv.chat, data, name, caption=caption)
                         sent_file = True
                     else:
                         reason = "bot cannot send files"
@@ -256,7 +284,7 @@ def _deliver(
                 # the upload was lost rather than failing silently.
                 notice = f"(failed to deliver file {name})"
                 try:
-                    bot.send_message(conv.chat, notice)
+                    _send(bot.send_message, conv.chat, notice)
                 except (ApiError, httpx.HTTPError):
                     log.exception("delivery-failed notice also failed for %s", to)
                 _notice(cfg, traj, step, "failed", reason=reason, filename=name)
@@ -276,13 +304,13 @@ def _deliver(
         sent_parts = 0
         for part in chunk(text):
             try:
-                bot.send_message(conv.chat, to_html(part), html=True)
+                _send(bot.send_message, conv.chat, to_html(part), html=True)
                 sent_parts += 1
             except ApiError:
                 # Bad HTML from an odd reply must not eat the message —
                 # fall back to plain text before giving up.
                 try:
-                    bot.send_message(conv.chat, part)
+                    _send(bot.send_message, conv.chat, part)
                     sent_parts += 1
                 except (ApiError, httpx.HTTPError) as exc:
                     failure = _exc_reason(exc)
