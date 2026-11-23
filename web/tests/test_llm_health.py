@@ -225,3 +225,54 @@ def test_last_call_garbage_ignored(tmp_path: Path, monkeypatch):
     (home / "run").mkdir(parents=True)
     (home / "run" / "llm_health.json").write_text("{not json")
     assert llm_health.last_call() is None
+
+
+# --- per-identity markers (thinkers run with SHELLM_HOME=<identity>/.shellm) ---
+
+
+def _write_identity_marker(identity: Path, payload: dict) -> None:
+    run = identity / ".shellm" / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "llm_health.json").write_text(json.dumps(payload))
+
+
+def test_last_call_reads_identity_marker(tmp_path: Path, monkeypatch):
+    """The mind's own calls land in <identity>/.shellm, not the state home."""
+    monkeypatch.setenv("HEADLONG_HOME", str(tmp_path / "home"))
+    root = _mk_identity(tmp_path, _thoughts(12, newest_minutes_ago=1, gap_s=30))
+    identity = root / ".identities" / "healthy"
+    _write_identity_marker(
+        identity,
+        {
+            "ok": False,
+            "ts": "2026-08-22T09:00:00Z",
+            "provider": "openrouter",
+            "model": "m",
+            "kind": "credit",
+            "http_code": 402,
+            "message": "Insufficient credits",
+        },
+    )
+    llm_health._cache.update(ts=0.0, root=None, payload=None)
+    payload = llm_health.llm_health(root)
+    last = payload["last_call"]
+    assert last is not None and last["ok"] is False
+    assert last["kind"] == "credit"
+    assert last["identity"] == "healthy"
+    assert payload["status"] == "erroring"
+
+
+def test_last_call_prefers_newest_marker(tmp_path: Path, monkeypatch):
+    """A stale state-home marker must not mask a fresh identity one."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HEADLONG_HOME", str(home))
+    _write_marker(home, {"ok": True, "ts": "2026-08-01T00:00:00Z"})
+    root = _mk_identity(tmp_path, _thoughts(12, newest_minutes_ago=1, gap_s=30))
+    _write_identity_marker(
+        root / ".identities" / "healthy",
+        {"ok": True, "ts": "2026-08-22T09:00:00Z", "provider": "openrouter", "model": "m"},
+    )
+    llm_health._cache.update(ts=0.0, root=None, payload=None)
+    last = llm_health.llm_health(root)["last_call"]
+    assert last["ts"] == "2026-08-22T09:00:00Z"
+    assert last["identity"] == "healthy"

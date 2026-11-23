@@ -1167,6 +1167,24 @@ stream_openai() {
                 mark_emitted
                 _emit_text "$_chunk" || break
             fi
+            # Reasoning models on OpenAI-style streams (deepseek, and most
+            # OpenAI-compatible servers) send their chain of thought on a
+            # separate delta field, "reasoning_content", and may finish with
+            # no content at all. Dropping it made such a response look like an
+            # empty stream: it retried twice, then died with "empty response"
+            # and took the whole run down. Anthropic's handler already
+            # surfaces thinking on stderr; do the same here, which both marks
+            # the stream as emitted (no retry after real output) and hands the
+            # thinking to the caller, whose empty-response retry feeds it back.
+            if [[ "$json" == *'"reasoning_content"'* && "$json" != *'"reasoning_content":null'* ]]; then
+                local _think
+                _think=$(printf '%s' "$json" | jq -j '.choices[0].delta.reasoning_content // empty'; printf X)
+                _think="${_think%X}"
+                if [[ -n "$_think" ]]; then
+                    mark_emitted
+                    printf '%s' "$_think" >&2
+                fi
+            fi
             # OpenRouter names the upstream host on every chunk; read it once.
             if [[ -z "$_llm_served_by" && "$json" == *'"provider"'* ]]; then
                 _llm_served_by=$(printf '%s' "$json" | jq -r '.provider // empty | if type == "string" then . else empty end' 2>/dev/null) || _llm_served_by=""

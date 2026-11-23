@@ -16,6 +16,10 @@ Two append-only sources feed it:
   fast path, other thinkers, hand calls), with ts/model/tokens. bin/llm
   appends it unconditionally, so it is the complete spend.
 
+cache is the part of in that the provider served from its prompt cache
+(cache_tok on a ledger line), so the hit rate is cache / in. Only the
+ledger carries it; a day counted from mind-log stamps has cache 0.
+
 Per day, the ledger wins when it has at least as many calls as the stamps
 (a complete ledger is a superset of the stamps); days before the ledger
 existed, the part-day it started on, or a day where it could not be written
@@ -44,7 +48,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 CACHE_DIRNAME = "usage"
 CACHE_FILE = "cache.json"
 LOCK_DIRNAME = ".lock"
@@ -53,8 +57,9 @@ LEDGER_FILE = "llm.jsonl"
 STALE_LOCK_S = 15 * 60
 
 COUNT_KEYS = ("rows", "in_msg", "out_msg", "runs", "reasoning")
-TOKEN_KEYS = ("calls", "in", "out", "think")
-TOKEN_FIELDS = (("in_tok", "in"), ("out_tok", "out"), ("think_tok", "think"))
+TOKEN_KEYS = ("calls", "in", "out", "think", "cache")
+TOKEN_FIELDS = (("in_tok", "in"), ("out_tok", "out"), ("think_tok", "think"),
+                ("cache_tok", "cache"))
 
 _OFFSET_FIX = re.compile(r"([+-][0-9]{2})([0-9]{2})$")
 
@@ -110,7 +115,7 @@ def is_refreshing(traj_dir: Path) -> bool:
 
 
 def _empty_tokens() -> dict:
-    return {"calls": 0, "in": 0, "out": 0, "think": 0, "models": {}}
+    return {"calls": 0, "in": 0, "out": 0, "think": 0, "cache": 0, "models": {}}
 
 
 def _empty_day() -> dict:
@@ -362,7 +367,8 @@ def summary(traj_dir: Path, identity_id: str, identity_name: str,
     daily = state.get("daily") or {}
     days = []
     by_model: dict[str, dict] = {}
-    totals = {"in": 0, "out": 0, "think": 0, "calls": 0, "in_msg": 0, "out_msg": 0, "runs": 0}
+    totals = {"in": 0, "out": 0, "think": 0, "cache": 0, "calls": 0,
+              "in_msg": 0, "out_msg": 0, "runs": 0}
     ledger_since = None
     for day_key in sorted(daily):
         merged, models = _merge_day(daily[day_key])

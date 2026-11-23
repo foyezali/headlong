@@ -80,8 +80,53 @@ frontmatter_field() {
         | sed "s/^[\"']\(.*\)[\"']$/\1/" || true
 }
 
+# Resolve a NAME against the slug in <ts>_<hex>_<slug>.md names: exact slug
+# first, then a unique prefix, then a unique substring. Prints one path and
+# returns 0; returns 1 for no match; for a tier with several it prints the
+# candidates and returns 2, because a wrong memory shown silently reads like
+# a right one. Before 2026-11-23 this branch did not exist, so the hint
+# printed in memory 511fd472 and in skills/shellm/SKILL.md failed on names.
+find_memory_by_slug() {
+    local name
+    # Slugs are lowercased with runs of anything else turned into one dash, so a
+    # caller typing words off a summary must be normalized the same way or the
+    # space in `llm health marker` can never meet the dash in the filename.
+    name=$(slugify "$1")
+    [[ -n "$name" ]] || return 1
+    local _f _b _slug
+    local -a _ex=() _pf=() _su=()
+    for _f in "$MEM_DIR"/*.md; do
+        [[ -e "$_f" ]] || continue
+        _b=${_f##*/}; _b=${_b%.md}
+        _slug=${_b#*_}; _slug=${_slug#*_}
+        if [[ "$_slug" == "$name" ]]; then _ex+=("$_f"); fi
+        if [[ "$_slug" == "$name"* ]]; then _pf+=("$_f"); fi
+        if [[ "$_slug" == *"$name"* ]]; then _su+=("$_f"); fi
+    done
+    local -a _tiers=("exact" "prefix" "substring")
+    local _t _n _list
+    for _t in "${_tiers[@]}"; do
+        case "$_t" in
+            exact) _n=${#_ex[@]}; _list=("${_ex[@]}") ;;
+            prefix) _n=${#_pf[@]}; _list=("${_pf[@]}") ;;
+            *) _n=${#_su[@]}; _list=("${_su[@]}") ;;
+        esac
+        [[ "$_n" -gt 0 ]] || continue
+        if [[ "$_n" -eq 1 ]]; then
+            printf "%s\n" "${_list[0]}"
+            return 0
+        fi
+        printf "mem: error: %s matches %s memories (%s):\n" "$name" "$_n" "$_t" >&2
+        local _c
+        for _c in "${_list[@]}"; do printf "  %s\n" "${_c##*/}" >&2; done
+        return 2
+    done
+    return 1
+}
+
 # Resolve a name/prefix/id to a memory file path.
-# Matches hex id, exact filename, then prefix/substring on slug portion.
+# Matches hex id, exact filename, exact slug, then a unique slug prefix, then a
+# unique slug substring. More than one candidate at a tier is an error, not a guess.
 find_memory() {
     local id="$1"
 
@@ -103,7 +148,15 @@ find_memory() {
     # Exact filename match
     [[ -f "$MEM_DIR/${id}.md" ]] && { echo "$MEM_DIR/${id}.md"; return; }
 
-    die "Memory not found: $id (use hex ID prefix from 'mem list')"
+    # Accept a name: every memory and skills/shellm/SKILL.md say `mem show <name>`,
+    # which failed until now because only a hex id or an exact filename resolved.
+    local _slug_rc=0
+    find_memory_by_slug "$id" || _slug_rc=$?
+    [[ "$_slug_rc" -eq 0 ]] && return 0
+    # find_memory_by_slug already printed the candidates on stderr. Return
+    # instead of exiting so a sourced caller or a test is not killed.
+    [[ "$_slug_rc" -eq 2 ]] && return 1
+    die "Memory not found: $id (try mem list, a hex id, or a word from the summary)"
 }
 
 # Parse filename into components: timestamp, hex id, slug
@@ -578,10 +631,15 @@ action_edit() {
     file=$(find_memory "$name")
 
     local slug=""
-    # Parse --slug flag
+    local append=0
+    # Parse --slug and --append. --append exists because replacing the whole
+    # body is destructive and rarely what a long memory needs: adding a section
+    # to a goal cost the whole 16 KB body on 2026-11-23, and the warning added
+    # then only says so after the fact. Flags come before the text.
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --slug) slug="${2:?--slug requires TEXT}"; shift 2 ;;
+            --append) append=1; shift ;;
             *) break ;;
         esac
     done
@@ -592,8 +650,8 @@ action_edit() {
     # --apply token silently became the whole memory, exit 0. Same guard as
     # mem add (PR 134): text that truly starts with a dash goes on stdin.
     if [[ "${1:-}" == -* ]]; then
-        die "edit: unknown option '$1'. mem edit takes only --slug, then the text:
-  mem edit <id> [--slug SLUG] <text>      (or the text on stdin)"
+        die "edit: unknown option '$1'. mem edit takes only --slug and --append, then the text:
+  mem edit <id> [--slug SLUG] [--append] <text>      (or the text on stdin)"
     fi
 
     local text="$*"
@@ -604,6 +662,17 @@ action_edit() {
 
     text=$(mem_redact "$text") || die "Redaction failed; memory not written"
 
+    # Append mode: keep the old body byte for byte and put the new text after a
+    # blank line. The new text is redacted on its own so the stored body is not
+    # rewritten (and re-redacted) just because a section was added.
+    if [[ "$append" -eq 1 ]]; then
+        local _old_for_append
+        _old_for_append=$(awk 'BEGIN{n=0} /^---$/{n++; next} n>=2' "$file")
+        if [[ -n "$_old_for_append" ]]; then
+            text=$(printf '%s\n\n%s' "$_old_for_append" "$text")
+        fi
+    fi
+
     if [[ -n "$slug" ]]; then
         slug=$(mem_redact "$slug") || die "Slug redaction failed; memory not written"
     fi
@@ -611,13 +680,31 @@ action_edit() {
     local now
     now=$(date +"%Y-%m-%d %H:%M:%S")
 
+    # A body that shrinks by more than two thirds is usually a replace meant as an
+    # append. Say so instead of losing the text quietly. An --append never
+    # shrinks, so it never warns.
+    local _old_body _old_n _new_n
+    _old_body=$(awk 'BEGIN{n=0} /^---$/{n++; next} n>=2' "$file")
+    _old_n=$(printf '%s' "$_old_body" | wc -c)
+    _new_n=$(printf '%s' "$text" | wc -c)
+    if [[ "$append" -eq 0 && "$_old_n" -gt 2000 && "$_new_n" -lt $(( _old_n / 3 )) ]]; then
+        printf 'mem: warning: this replaces %s bytes of body with %s. To keep the old text, include it in the new one (mem show first, or use --append).\n' "$_old_n" "$_new_n" >&2
+    fi
+
     # Extract frontmatter fields. `until:` (mem add --until) rides through an
     # edit: a todo shortlist that is appended to during the day must still
     # expire that night. So do `schedule:` and `tz:` (design/scheduled_goals.md).
     local summary type created id until _k _v
-    # Drain the body so upstream writers cannot fail with SIGPIPE.
-    summary=$(printf '%s' "$text" | sed '/^[[:space:]]*$/d' | sed -n '1p' | cut -c1-80)
-    warn_flag_summary "$summary"
+    if [[ "$append" -eq 1 ]]; then
+        # Appending must not rename the memory: keep the summary it already has
+        # (falling back to the first line if it somehow lacks one).
+        summary=$(frontmatter_field "$file" "summary")
+        [[ -n "$summary" ]] || summary=$(printf '%s' "$text" | sed '/^[[:space:]]*$/d' | sed -n '1p' | cut -c1-80)
+    else
+        # Drain the body so upstream writers cannot fail with SIGPIPE.
+        summary=$(printf '%s' "$text" | sed '/^[[:space:]]*$/d' | sed -n '1p' | cut -c1-80)
+        warn_flag_summary "$summary"
+    fi
     type=$(frontmatter_field "$file" "type")
     created=$(frontmatter_field "$file" "created")
     id=$(frontmatter_field "$file" "id")
@@ -626,9 +713,10 @@ action_edit() {
     # Build updated: field — collect existing entries and append new one
     local updated_block=""
     local existing_updated
-    existing_updated=$(sed -n '/^---$/,/^---$/p' "$file" | grep "^updated:" | sed 's/^updated:[[:space:]]*//' || true)
+    existing_updated=$(awk 'BEGIN{n=0} /^---$/{n++; next} n==1' "$file" | grep "^updated:" | sed 's/^updated:[[:space:]]*//' || true)
     local existing_list
-    existing_list=$(sed -n '/^---$/,/^---$/p' "$file" | grep "^  - " || true)
+    # Same reason: only the first block is the header.
+    existing_list=$(awk 'BEGIN{n=0} /^---$/{n++; next} n==1' "$file" | grep "^  - " || true)
 
     if [[ -n "$existing_list" ]]; then
         # Already a list — append
@@ -673,6 +761,9 @@ EOF
     local new_slug
     if [[ -n "$slug" ]]; then
         new_slug=$(slugify "$slug")
+    elif [[ "$append" -eq 1 ]]; then
+        # Keep the current name; only an explicit --slug renames on append.
+        new_slug="$_pf_slug"
     else
         new_slug=$(slugify "$text")
     fi
@@ -706,7 +797,11 @@ Usage:
   mem types                      List memory types with counts
   mem show <id>                  Show a memory's full contents
   mem forget <id>                Delete a memory by hex ID
-  mem edit <id> [--slug SLUG] <text>  Update body (or pipe via stdin)
+  mem edit <id> [--slug SLUG] [--append] <text>
+                                 Replace the body (or pipe via stdin). --append
+                                 adds to the end and keeps the summary, name
+                                 and until: date, which is the common case for
+                                 a long memory.
 
 Storage:
   Add/edit redact known credential values and formats, private-key blocks, and

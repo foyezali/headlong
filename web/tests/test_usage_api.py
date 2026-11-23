@@ -102,7 +102,8 @@ def test_refresh_builds_daily_series(traj_dir: Path):
     assert d1["runs"] == 1 and d1["reasoning"] == 2
     assert d1["run"]["calls"] == 1
     assert (d1["run"]["in"], d1["run"]["out"], d1["run"]["think"]) == (1000, 50, 10)
-    assert d1["run"]["models"] == {"modelA": {"calls": 1, "in": 1000, "out": 50, "think": 10}}
+    assert d1["run"]["models"] == {
+        "modelA": {"calls": 1, "in": 1000, "out": 50, "think": 10, "cache": 0}}
     assert d1["llm"]["calls"] == 0
     d2 = _day(state, "2026-08-02")
     assert d2["in_msg"] == 0 and d2["run"]["calls"] == 1 and d2["run"]["in"] == 2000
@@ -203,12 +204,12 @@ def test_ledger_wins_per_day_and_older_days_fall_back(traj_dir: Path, ledger: Pa
     assert days["2026-08-02"]["runs"] == 1 and days["2026-08-02"]["reasoning"] == 2
     assert days["2026-08-03"] == {
         "rows": 0, "in_msg": 0, "out_msg": 0, "runs": 0, "reasoning": 0,
-        "calls": 1, "in": 700, "out": 9, "think": 2, "source": "ledger",
+        "calls": 1, "in": 700, "out": 9, "think": 2, "cache": 0, "source": "ledger",
     }
     assert body["by_model"] == {
-        "modelA": {"calls": 2, "in": 1700, "out": 59, "think": 12},   # 08-01 stamp + 08-03 ledger
-        "modelB": {"calls": 1, "in": 2000, "out": 80, "think": 0},
-        "fast/model": {"calls": 1, "in": 300, "out": 20, "think": 0},
+        "modelA": {"calls": 2, "in": 1700, "out": 59, "think": 12, "cache": 0},
+        "modelB": {"calls": 1, "in": 2000, "out": 80, "think": 0, "cache": 0},
+        "fast/model": {"calls": 1, "in": 300, "out": 20, "think": 0, "cache": 0},
     }
     assert body["totals"]["in"] == 4000 and body["totals"]["calls"] == 4
     assert body["ledger"] == {"rows": 5, "skipped": 2, "since": "2026-08-02"}
@@ -224,8 +225,8 @@ def test_ledger_is_incremental_and_rebuilds_when_it_shrinks(traj_dir: Path, ledg
         fh.write('{"ts": "2026-08-04T13:00:00Z", "model": "m", "in_tok": 5')  # partial
     state = usage.refresh(traj_dir, "usr", ledger=ledger)
     assert _day(state, "2026-08-04")["llm"] == {
-        "calls": 2, "in": 30, "out": 3, "think": 0,
-        "models": {"m": {"calls": 2, "in": 30, "out": 3, "think": 0}},
+        "calls": 2, "in": 30, "out": 3, "think": 0, "cache": 0,
+        "models": {"m": {"calls": 2, "in": 30, "out": 3, "think": 0, "cache": 0}},
     }
     assert usage.summary(traj_dir, "id", "usr", ledger=ledger)["pending_bytes"] > 0
     ledger.write_text(_ledger_row("2026-08-06", "m", 1, 1))   # rotated: smaller
@@ -255,6 +256,26 @@ def test_partial_ledger_day_keeps_the_stamps(traj_dir: Path, ledger: Path):
     assert days["2026-08-01"]["calls"] == 2 and days["2026-08-01"]["in"] == 1010
     assert days["2026-08-02"]["source"] == "ledger"
     assert body["ledger"]["since"] == "2026-08-02"
+
+
+def test_cache_tokens_flow_through(traj_dir: Path, ledger: Path):
+    """cache_tok is the part of in_tok served from the prompt cache; it lands
+    on the day, the model and the totals, and a line without it counts as 0."""
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps({"ts": "2026-08-05T10:00:00Z", "model": "m",
+                    "in_tok": 1000, "out_tok": 10, "cache_tok": 900}) + "\n"
+        + json.dumps({"ts": "2026-08-05T10:01:00Z", "model": "m",
+                      "in_tok": 100, "out_tok": 1}) + "\n")
+    state = usage.refresh(traj_dir, "usr", ledger=ledger)
+    day = _day(state, "2026-08-05")["llm"]
+    assert (day["in"], day["cache"]) == (1100, 900)
+    assert day["models"]["m"] == {
+        "calls": 2, "in": 1100, "out": 11, "think": 0, "cache": 900}
+    body = usage.summary(traj_dir, "id", "usr", ledger=ledger)
+    assert body["by_model"]["m"]["cache"] == 900
+    assert body["totals"]["cache"] == 900
+    assert dict(body["daily"])["2026-08-05"]["cache"] == 900
 
 
 def test_missing_ledger_is_fine(traj_dir: Path, ledger: Path):
@@ -287,7 +308,8 @@ def test_usage_refresh_then_serve(client: TestClient, traj_dir: Path, ledger: Pa
     assert body["pending_bytes"] == 0
     assert [d for d, _ in body["daily"]] == ["2026-08-01", "2026-08-02", "2026-08-03"]
     assert body["totals"] == {
-        "in": 3040, "out": 134, "think": 11, "calls": 3, "in_msg": 1, "out_msg": 1, "runs": 2,
+        "in": 3040, "out": 134, "think": 11, "cache": 0, "calls": 3,
+        "in_msg": 1, "out_msg": 1, "runs": 2,
     }
     assert set(body["by_model"]) == {"modelA", "modelB", "modelC"}
     assert body["skipped"] == 2

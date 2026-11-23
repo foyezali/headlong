@@ -5,6 +5,7 @@ import { cn } from "~/lib/utils";
 
 const TABS = [
   { key: "timeline", label: "Timeline", path: "" },
+  { key: "soul", label: "Soul", path: "/soul" },
   { key: "recap", label: "Recap", path: "/recap" },
   { key: "mindlog", label: "Mind log", path: "/mindlog" },
   { key: "mindlog2", label: "Mind log v2", path: "/mindlog2" },

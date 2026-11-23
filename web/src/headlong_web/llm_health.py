@@ -150,17 +150,66 @@ def _state_home() -> Path:
     return Path(getenv("HEADLONG_HOME") or os.path.expanduser("~/.headlong"))
 
 
-def last_call() -> dict | None:
-    """The marker bin/llm rewrites after every call (state home, run/llm_health.json):
-    ok, or a classified failure (credit / auth / rate / other). None if absent."""
-    path = _state_home() / "run" / "llm_health.json"
+def _marker_candidates(identity: discovery.IdentityInfo) -> list[Path]:
+    """Where bin/llm may have written this identity's marker.
+
+    A plain `llm` call uses the state home (HEADLONG_HOME / SHELLM_HOME /
+    ~/.headlong), one file for the whole box. Anything launched by
+    bin/thinkers gets SHELLM_HOME=<identity>/.shellm, so a thinking mind
+    writes its marker per identity instead. Both are real; check both.
+    """
+    return [
+        identity.path / ".shellm" / "run" / "llm_health.json",
+        identity.path / ".headlong" / "run" / "llm_health.json",
+        _state_home() / "run" / "llm_health.json",
+    ]
+
+
+def _read_marker(path: Path) -> dict | None:
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict) or "ok" not in data:
         return None
-    return {
+    return data
+
+
+def last_call(root: Path | None = None) -> dict | None:
+    """The freshest marker bin/llm rewrote after a call: ok, or a classified
+    failure (credit / auth / rate / other). None if absent.
+
+    The state-home marker alone is not enough: thinkers run with
+    SHELLM_HOME=<identity>/.shellm, so the mind's own calls never touch it and
+    it can sit a day old while the mind is failing every thought. With `root`
+    given, every identity's marker is considered too, and the newest ts wins.
+    """
+    candidates: list[tuple[Path, str | None]] = []
+    if root is not None:
+        for identity in discovery.scan_identities(root):
+            for path in _marker_candidates(identity)[:-1]:
+                candidates.append((path, identity.name))
+    candidates.append((_state_home() / "run" / "llm_health.json", None))
+
+    best: tuple[float, dict, str | None, Path] | None = None
+    for path, name in candidates:
+        data = _read_marker(path)
+        if data is None:
+            continue
+        parsed = _parse_ts(str(data.get("ts") or ""))
+        if parsed is None:
+            try:
+                parsed = path.stat().st_mtime
+            except OSError:
+                parsed = 0.0
+        ts = parsed
+        if best is None or ts > best[0]:
+            best = (ts, data, name, path)
+
+    if best is None:
+        return None
+    _, data, name, _ = best
+    payload = {
         "ok": bool(data.get("ok")),
         "ts": data.get("ts"),
         "provider": data.get("provider") or None,
@@ -169,6 +218,10 @@ def last_call() -> dict | None:
         "http_code": data.get("http_code"),
         "message": data.get("message"),
     }
+    # Which mind the marker came from; absent for the box-wide state-home one.
+    if name:
+        payload["identity"] = name
+    return payload
 
 
 def llm_health(root: Path) -> dict:
@@ -195,7 +248,7 @@ def llm_health(root: Path) -> dict:
         for i in identities
     )
 
-    last = last_call()
+    last = last_call(root)
     if failures_15m >= 3:
         status = "erroring"
     elif failures_1h >= 1 or slow:

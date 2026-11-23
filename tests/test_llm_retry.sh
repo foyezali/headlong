@@ -53,6 +53,16 @@ case "$mode" in
             printf '{"error":{"message":"Provider returned error","code":502}}\n'
         fi
         ;;
+    sse-reasoning-only)   # reasoning on delta.reasoning_content, no content
+        printf 'data: {"choices":[{"delta":{"reasoning_content":"let me think"}}]}\n\n'
+        printf 'data: {"choices":[{"delta":{"reasoning_content":" harder"}}]}\n\n'
+        printf 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        printf 'data: [DONE]\n'
+        ;;
+    sse-reasoning-then-text)
+        printf 'data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}\n\n'
+        printf 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n'
+        ;;
     sse-ok)
         printf 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n'
         ;;
@@ -328,6 +338,30 @@ reset $'empty-body\nhttp-200'
 out=$(LLM_RETRIES=2 run_llm --no-stream)
 check "non-stream empty retried"      test "$out" = "ok"
 check "empty is whitespace error"     test "$(calls)" = "2"
+
+# ---------------------------------------------------------------------------
+# Reasoning-only stream: an OpenAI-style provider that puts its chain of
+# thought on delta.reasoning_content and then finishes with no content at
+# all. That is a real answer, not an empty stream: the reasoning must reach
+# stderr (so run_loop can feed it back) and must NOT be retried as if nothing
+# arrived. Deepseek via opencode-go does exactly this, and every run it
+# happened in died with "empty response" (2026-11-23).
+# ---------------------------------------------------------------------------
+
+reset "sse-reasoning-only"
+out=$(LLM_RETRIES=2 run_llm)
+rc=$?
+check "reasoning-only succeeds"        test "$rc" -eq 0
+check "reasoning-only has no stdout"   test -z "$out"
+check "reasoning-only not retried"     test "$(calls)" = "1"
+check "reasoning reaches stderr"       grep -q "let me think harder" "$WORK/stderr"
+check_not "reasoning-only not empty"   grep -q "empty response" "$WORK/stderr"
+
+reset "sse-reasoning-then-text"
+out=$(LLM_RETRIES=2 run_llm)
+check "reasoning+text succeeds"        test "$rc" -eq 0
+check "reasoning+text output"          test "$out" = "ok"
+check "reasoning+text one call"        test "$(calls)" = "1"
 
 # ---------------------------------------------------------------------------
 # Usage ledger: every successful call appends one line, with or without a

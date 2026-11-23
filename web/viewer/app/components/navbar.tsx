@@ -134,6 +134,9 @@ function LlmHealthChip() {
             <div className="flex items-baseline justify-between">
               <span className="font-medium">
                 LLM provider: <span className="font-mono">{health.status}</span>
+                {last?.identity && (
+                  <span className="font-mono text-muted-foreground"> · {last.identity}</span>
+                )}
               </span>
               <span className="text-[10px] text-muted-foreground">
                 {health.failures_1h} failure(s) in the last hour

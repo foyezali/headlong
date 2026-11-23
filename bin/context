@@ -560,30 +560,102 @@ if [[ "$result_bytes" -le "$CTX_MAX_BYTES" ]]; then
     exit 0
 fi
 
-# Binary search for the right prompt_limit to fit the budget.
-lo=0
-hi="$CTX_PROMPT_LIMIT"
-best_result="$result"
-best_bytes="$result_bytes"
 
-while [[ "$lo" -le "$hi" ]]; do
-    mid=$(( (lo + hi) / 2 ))
-    render_at "$mid"
-    try_result="$RENDER_MSGS"
-    try_bytes=$(printf '%s' "$try_result" | LC_ALL=C wc -c | tr -d ' ')
+# ---------------------------------------------------------------------------
+# Fit the render into --max-bytes.
+#
+# prompt-limit is NOT monotone. At small limits the truncation marker
+# ("[... N bytes total. read with: traj show <id> --full]") costs more than the
+# bytes it replaces, so a limit of 0 renders BIGGER than a limit of 100:
+# measured on tests/fixtures/basic with production types, 6892 bytes at 0 vs
+# 3470 at 100. A binary search assumes monotonicity and so can step past the
+# largest render that would have fit. Scan a halving ladder of candidate limits
+# instead and keep the largest output that fits. Renders are near-flat in cost
+# (head+tail rows, one jq pass), so ~a dozen of them is cheap next to one model
+# call. The ladder finds a fitting render, not provably the largest one.
+# ---------------------------------------------------------------------------
 
+_candidates="$CTX_PROMPT_LIMIT"
+_l="$CTX_PROMPT_LIMIT"
+while [[ "$_l" -gt 0 ]]; do
+    _l=$(( _l / 2 ))
+    _candidates+=$'\n'"$_l"
+done
+# Small limits matter most where the marker floor dominates.
+_candidates+=$'\n10\n2\n1\n0'
+_candidates=$(printf '%s\n' "$_candidates" | grep -E '^[0-9]+$' | sort -un)
+
+best_result=""
+best_bytes=""
+_best_cand=""
+
+while IFS= read -r _cand; do
+    [[ -n "$_cand" ]] || continue
+    render_at "$_cand"
+    try_bytes=$(printf '%s' "$RENDER_MSGS" | LC_ALL=C wc -c | tr -d ' ')
     if [[ "$try_bytes" -le "$CTX_MAX_BYTES" ]]; then
-        best_result="$try_result"
-        best_bytes="$try_bytes"
-        lo=$((mid + 1))
-    else
-        hi=$((mid - 1))
+        if [[ -z "$best_bytes" || "$try_bytes" -gt "$best_bytes" ]]; then
+            best_result="$RENDER_MSGS"
+            best_bytes="$try_bytes"
+            _best_cand="$_cand"
+        fi
     fi
+done <<< "$_candidates"
+
+# Refine: the ladder is geometric, so it can stop below the largest fitting
+# render. Probe a few points in the gap just above the best fitting candidate
+# and just below the smallest failing one, and keep anything both bigger and
+# within budget. A hill climb, not a proof: non-monotonicity means a probe that
+# fails does not prove the next one up fails too.
+if [[ -n "$best_bytes" ]]; then
+    _hi_fail=""
+    while IFS= read -r _cand; do
+        [[ -n "$_cand" ]] || continue
+        if [[ "$_cand" -gt "$_best_cand" ]]; then _hi_fail="$_cand"; break; fi
+    done <<< "$_candidates"
+    if [[ -z "$_hi_fail" ]]; then _hi_fail="$CTX_PROMPT_LIMIT"; fi
+    _lo="$_best_cand"
+    _probe=""
+    for _i in 1 2 3 4 5 6; do
+        [[ "$_hi_fail" -gt $(( _lo + 1 )) ]] || break
+        _mid=$(( (_lo + _hi_fail) / 2 ))
+        [[ "$_mid" -eq "$_lo" || "$_mid" -eq "$_hi_fail" ]] && break
+        render_at "$_mid"
+        _tb=$(printf '%s' "$RENDER_MSGS" | LC_ALL=C wc -c | tr -d ' ')
+        if [[ "$_tb" -le "$CTX_MAX_BYTES" && "$_tb" -gt "$best_bytes" ]]; then
+            best_result="$RENDER_MSGS"; best_bytes="$_tb"; _lo="$_mid"; _best_cand="$_mid"
+        else
+            _hi_fail="$_mid"
+        fi
+    done
+fi
+
+if [[ -n "$best_result" ]]; then
+    printf '%s' "$best_result"
+    exit 0
+fi
+
+# Nothing fits, not even the floor with every field cut to a marker. Emit a
+# VALID messages array rather than a byte-sliced one: a raw `head -c` cut is
+# invalid JSON, and the caller (`llm -M`) turns that into a provider error where
+# it expected context. A short notice is degraded but usable; a parse error is
+# not. The notice is ASCII, so its character count is its byte count.
+_note="[context over budget: this trajectory could not be rendered within ${CTX_MAX_BYTES} bytes even with every field truncated to a marker. Ask for a larger --max-bytes, or narrow the window with --tail/--run.]"
+_arr=""
+_ab=0
+while :; do
+    _arr=$(jq -cn --arg c "$_note" '[{role:"user",content:$c}]' 2>/dev/null) || _arr='[]'
+    _ab=$(printf '%s' "$_arr" | LC_ALL=C wc -c | tr -d ' ')
+    [[ "$_ab" -le "$CTX_MAX_BYTES" || ${#_note} -le 1 ]] && break
+    _note="${_note:0:$(( ${#_note} / 2 ))}"
 done
 
-if [[ "$best_bytes" -gt "$CTX_MAX_BYTES" ]]; then
-    printf '%s' "$best_result" | head -c "$CTX_MAX_BYTES"
-    printf '[budget exceeded: trajectory too dense]' >&2
+if [[ "$_ab" -le "$CTX_MAX_BYTES" ]]; then
+    printf '[budget exceeded: trajectory too dense for %s bytes, emitting a notice]' "$CTX_MAX_BYTES" >&2
+    printf '%s' "$_arr"
 else
-    printf '%s' "$best_result"
+    # Budget smaller than the smallest JSON envelope. Validity wins over the
+    # byte cap here; the caller is told why.
+    printf '[budget exceeded: budget %s is smaller than the minimal JSON envelope]' "$CTX_MAX_BYTES" >&2
+    printf '[]'
 fi

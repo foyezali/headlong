@@ -195,5 +195,42 @@ check "run row: self-launched keeps cmd" grep -q 'summarize the THREE study' <<<
 check "run row: row count unchanged"   test "$(wc -l < "$TSV2" | tr -d ' ')" = "4"
 check "run row: compact (<160 chars)"  test "$(awk -F"\t" '$2=="st000002"{print length($4)}' "$TSV2")" -lt 160
 
+# ---------------------------------------------------------------------------
+# 9. A torn raw line must not swallow the steps after it. Plain `jq -r`
+#    aborts at the first parse error; because the cache then records the whole
+#    raw line count as rendered, every step past the bad line was lost for
+#    good. The renderer now parses one raw line at a time, skips the bad one,
+#    reports it on stderr, and keeps going.
+# ---------------------------------------------------------------------------
+RUN3="torn3333-root"
+mkdir -p "$TRAJ_ROOT/$RUN3"
+J3="$TRAJ_ROOT/$RUN3/trajectory.jsonl"
+{
+  printf '{"type":"trajectory","step_id":"torn3333-0000-4000-8000-000000000000","ts":"t0"}\n'
+  printf '{"type":"thought","step_id":"st000001","ts":"2026-09-01T09:00:01","source":"monolith","content":"BEFORE-TEAR"}\n'
+  printf '{"type":"thought","step_id":"st000002","ts":"2026-09-01T09:00:02","source":"monolith","content":"BEFORE-TEAR-2"}\n'
+  printf '{"type":"thought","step_id":"st000003","ts":"2026-09\n'
+  printf '{"type":"thought","step_id":"st000004","ts":"2026-09-01T09:00:04","source":"monolith","content":"AFTER-TEAR"}\n'
+  printf '{"type":"thought","step_id":"st000005","ts":"2026-09-01T09:00:05","source":"monolith","content":"AFTER-TEAR-2"}\n'
+  printf '\n'
+  printf '{"type":"thought","step_id":"st000006","ts":"2026-09-01T09:00:06","source":"monolith","content":"AFTER-BLANK"}\n'
+} > "$J3"
+out9=$(recap torn3333 --traj_dir "$TRAJ_ROOT" --context --raw-tail 50 2>&1)
+TSV3="$TRAJ_ROOT/$RUN3/rollups/rendered.tsv"
+
+check "torn: exits 0"                 test $? -eq 0
+check "torn: before the tear kept"    grep -q 'BEFORE-TEAR' <<<"$out9"
+check "torn: after the tear kept"     grep -q 'AFTER-TEAR' <<<"$out9"
+check "torn: after the tear 2 kept"   grep -q 'AFTER-TEAR-2' <<<"$out9"
+check "torn: past a blank line kept"  grep -q 'AFTER-BLANK' <<<"$out9"
+check "torn: 5 signal rows"           test "$(wc -l < "$TSV3" | tr -d ' ')" = "5"
+check "torn: bad line reported"       grep -q 'skipping malformed raw line 4' <<<"$out9"
+check "torn: raw line numbers true"   test "$(awk -F'\t' '$4 ~ /AFTER-TEAR-2/{print $1}' "$TSV3")" = "6"
+
+# The pre-fix behaviour, pinned so the test would have failed: a plain jq pass
+# over the same file stops at the tear and loses everything after it.
+pre_fix_rows=$(jq -r 'select(type=="object")|select(.type=="thought")|.content' "$J3" 2>/dev/null | wc -l | tr -d ' ')
+check "torn: pre-fix form would lose rows" test "$pre_fix_rows" -lt 5
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 exit $(( fail > 0 ))

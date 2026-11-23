@@ -2,7 +2,7 @@
 name: chat
 description: Reply to humans who are chatting with me
 metadata:
-  shellm:
+  shelllm:
     requires:
       bins: ["chat"]
 ---

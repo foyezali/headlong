@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
 
+import { SoulPanel } from "~/components/soul-panel";
 import { StartStopButtons, useControlsEnabled } from "~/components/thinker-controls";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -301,7 +302,9 @@ export default function Home() {
           </EmptyHeader>
         </Empty>
       ) : (
-        [...groups.entries()].map(([group, members]) => (
+        <>
+        <SoulPanel identities={identities} />
+        {[...groups.entries()].map(([group, members]) => (
           <section key={group}>
             <h2 className="mb-2 font-mono text-xs font-medium uppercase tracking-wider text-muted-foreground">
               {group}
@@ -376,7 +379,8 @@ export default function Home() {
               </Table>
             </div>
           </section>
-        ))
+        ))}
+        </>
       )}
     </div>
   );

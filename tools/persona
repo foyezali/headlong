@@ -126,15 +126,63 @@ _activate() {
     fi
 }
 
+# _iso_mtime FILE — the file's mtime as an ISO-8601 UTC stamp, the same shape
+# bin/llm writes, so markers can be compared as text. Prints nothing if the
+# platform's stat/date pair is unexpected.
+_iso_mtime() {
+    local f="$1" m
+    m=$(stat -c %Y "$f" 2>/dev/null) || m=$(stat -f %m "$f" 2>/dev/null) || return 1
+    date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -r "$m" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
+# _llm_newest_marker — path of the freshest health marker bin/llm wrote for
+# this identity, on stdout; nothing when there is none.
+#
+# bin/llm writes to $_llm_home, which is HEADLONG_HOME/SHELLM_HOME/~/.headlong.
+# A plain shell and the dash use the state home, but bin/thinkers exports
+# SHELLM_HOME=<identity>/.shellm, so the mind's own calls land per identity and
+# never touch the state-home file. Reading only one of them is how a real
+# credit or auth failure stays quiet while an old one keeps shouting. So check
+# every place a writer can land and let the newest timestamp decide, the same
+# rule web/src/headlong_web/llm_health.py uses for the dash.
+_llm_newest_marker() {
+    local id="${IDENTITY_ROOT:-/nonexistent}/$NAME"
+    local f ts best="" best_ts=""
+    for f in "$id/.shellm/run/llm_health.json" \
+             "$id/.headlong/run/llm_health.json" \
+             "$SHELLM_HOME/run/llm_health.json"; do
+        [[ -f "$f" ]] || continue
+        # Only a file bin/llm could have written counts: a JSON object with a
+        # boolean ok. A half-written or truncated marker is skipped rather than
+        # preferred for being new.
+        jq -e 'type == "object" and (.ok | type) == "boolean"' "$f" >/dev/null 2>&1 || continue
+        ts=$(jq -r '.ts // ""' "$f" 2>/dev/null || true)
+        [[ -n "$ts" ]] || ts=$(_iso_mtime "$f" 2>/dev/null || true)
+        # An unreadable stamp sorts oldest, so a broken file cannot mask a
+        # real one.
+        [[ -n "$ts" ]] || ts="0000-00-00T00:00:00Z"
+        if [[ -z "$best" || "$ts" > "$best_ts" ]]; then
+            best="$f"; best_ts="$ts"
+        fi
+    done
+    [[ -n "$best" ]] && printf '%s' "$best"
+    return 0
+}
+
 # _llm_health_warn — if the last LLM call (any thinker, any tool) failed,
-# say so, loudly, with what to do. Reads the marker bin/llm keeps at
-# $SHELLM_HOME/run/llm_health.json. Returns 0 if something was printed.
+# say so, loudly, with what to do. Reads the freshest marker bin/llm keeps
+# (see _llm_newest_marker). Returns 0 if something was printed.
 _llm_health_warn() {
-    local f="$SHELLM_HOME/run/llm_health.json" ok kind code msg ts provider hint
-    [[ -f "$f" ]] || return 1
+    local f ok kind code msg ts provider hint envdir
+    f=$(_llm_newest_marker)
+    [[ -n "$f" ]] || return 1
     ok=$(jq -r '.ok' "$f" 2>/dev/null || echo true)
     [[ "$ok" == "false" ]] || return 1
     IFS=$'\t' read -r kind code msg ts provider < <(jq -r '[(.kind // "other"), (.http_code // "" | tostring), (.message // ""), (.ts // ""), (.provider // "")] | @tsv' "$f" 2>/dev/null)
+    # Name the state home that marker came from, not the caller's: a
+    # per-identity marker means the thinker's .shellm/.env.
+    envdir=$(dirname "$(dirname "$f")")
     case "$provider" in
         openrouter) hint="https://openrouter.ai/settings/credits" ;;
         anthropic)  hint="https://console.anthropic.com/settings/billing" ;;
@@ -147,11 +195,11 @@ _llm_health_warn() {
         credit)
             echo "!! LLM: OUT OF CREDIT — the API key has no money left (${provider:-provider}${code:+, HTTP $code}, last tried $ts)."
             echo "   $NAME's mind keeps trying but every thought fails until the key has credit."
-            echo "   Top up at $hint (or put a new key in $SHELLM_HOME/.env), then: $CMD start"
+            echo "   Top up at $hint (or put a new key in $envdir/.env), then: $CMD start"
             ;;
         auth)
             echo "!! LLM: KEY REJECTED — the API key is invalid or revoked (${provider:-provider}${code:+, HTTP $code}, last tried $ts)."
-            echo "   Put a working key in $SHELLM_HOME/.env, then: $CMD start"
+            echo "   Put a working key in $envdir/.env, then: $CMD start"
             ;;
         rate)
             echo "!! LLM: RATE LIMITED by ${provider:-the provider}${code:+ (HTTP $code)}, last tried $ts. Usually clears on its own."

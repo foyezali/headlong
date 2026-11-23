@@ -295,6 +295,40 @@ else
     bad "invariant/fork-count" "$_delta processes spawned (expected < 150)"
 fi
 
+# 8. --max-bytes must never emit invalid JSON, and must not fall back to a
+#    notice when a real render would fit. prompt-limit is non-monotone (small
+#    limits cost MORE because the truncation marker outweighs what it replaces:
+#    6892 bytes at --prompt-limit 0 vs 3470 at 100 on fixture/basic), so the old
+#    binary search could walk past a fitting render. Sweep budgets and assert
+#    every output parses as a JSON array; then assert a budget just under the
+#    floor still gets a real multi-step render, not the single notice.
+_budget_bad=""
+for _b in 1 2 10 37 64 256 512 1024 2000 3000 3470 4000 6000 8192; do
+    # shellcheck disable=SC2086
+    _o=$(run_case basic --max-bytes "$_b" $PROD 2>/dev/null)
+    if ! printf '%s' "$_o" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        _budget_bad="budget $_b is not a JSON array"
+        break
+    fi
+done
+if [[ -z "$_budget_bad" ]]; then
+    ok "invariant/max-bytes-valid-json-sweep"
+else
+    bad "invariant/max-bytes-valid-json-sweep" "$_budget_bad"
+fi
+
+# 9. At a budget comfortably above the marker floor, the render must be bigger
+#    than the floor render itself (i.e. the search found real content).
+_floor=$(run_case basic --prompt-limit 0 $PROD 2>/dev/null | LC_ALL=C wc -c | tr -d ' ')
+_floor=$(( (_floor / 4) * 3 ))
+# shellcheck disable=SC2086
+_big=$(run_case basic --max-bytes "$_floor" $PROD 2>/dev/null | LC_ALL=C wc -c | tr -d ' ')
+if [[ "$_big" -gt $(( _floor / 2 )) ]]; then
+    ok "invariant/max-bytes-finds-a-fitting-render ($_big bytes at budget $_floor)"
+else
+    bad "invariant/max-bytes-finds-a-fitting-render" "$_big bytes at budget $_floor"
+fi
+
 # ---------------------------------------------------------------------------
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

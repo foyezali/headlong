@@ -40,6 +40,12 @@ function fmtNum(n: number): string {
   return String(Math.round(n));
 }
 
+/** part / whole as a whole-number percent, or a dash when there is no whole. */
+function fmtPct(part: number, whole: number): string {
+  if (whole <= 0) return "\u2014";
+  return `${Math.round((part / whole) * 100)}%`;
+}
+
 function fmtBytes(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
@@ -442,6 +448,10 @@ export default function UsagePage() {
           <Tile value={fmtNum(tok7)} label="tokens / day, last 7d" />
           <Tile value={msg7.toFixed(0)} label="messages / day, last 7d" />
           <Tile value={calls7.toFixed(0)} label="model calls / day, last 7d" />
+          <Tile
+            value={fmtPct(totals.cache, totals.in)}
+            label="input from prompt cache"
+          />
           <Tile value={String(days.length)} label="days in the log" />
         </div>
 
@@ -454,7 +464,7 @@ export default function UsagePage() {
                   ? "Input, output and thinking tokens stamped on shellm reasoning steps. Only shellm runs are counted: the llm usage ledger (every bin/llm call) has no rows yet, so fast-path replies and other thinkers are missing until it does."
                   : ledgerCoversAll
                     ? "Input, output and thinking tokens of every bin/llm call (usage ledger): shellm runs, fast-path replies and other thinkers."
-                    : `Input, output and thinking tokens. From ${ledgerSince} on: every bin/llm call (usage ledger). Before that: shellm runs only (tokens stamped on reasoning steps), so fast-path replies and other thinkers are missing on those days.`}
+                    : `Input, output and thinking tokens. From ${ledgerSince} on: every bin/llm call (usage ledger). Before that: shellm runs only (tokens stamped on reasoning steps), so fast-path replies and other thinkers are missing on those days. Cached input is part of input, not a fourth bar: its share is in the per-model table and the tile above.`}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -516,6 +526,8 @@ export default function UsagePage() {
               <CardDescription>
                 Same coverage as the tokens chart. Ledger days carry the model on each call; on
                 mind-log days it comes from the run's shellm-run row ("?" = steps with no run id).
+                Cached is the part of input the provider served from its prompt cache, so its
+                percentage is the cache hit rate.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -528,6 +540,7 @@ export default function UsagePage() {
                       <TableHead>model</TableHead>
                       <TableHead className="text-right">calls</TableHead>
                       <TableHead className="text-right">input</TableHead>
+                      <TableHead className="text-right">cached</TableHead>
                       <TableHead className="text-right">output</TableHead>
                       <TableHead className="text-right">thinking</TableHead>
                     </TableRow>
@@ -541,6 +554,14 @@ export default function UsagePage() {
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {v.in.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {v.cache > 0 ? v.cache.toLocaleString() : "\u2014"}
+                          {v.cache > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">
+                              {fmtPct(v.cache, v.in)}
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {v.out.toLocaleString()}

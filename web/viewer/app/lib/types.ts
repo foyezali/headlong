@@ -27,6 +27,8 @@ export interface LlmHealthIdentity {
 export interface LlmLastCall {
   ok: boolean;
   ts: string | null;
+  /** Which identity's mind wrote the marker; absent for the box-wide file. */
+  identity?: string | null;
   provider: string | null;
   model: string | null;
   kind: "credit" | "auth" | "rate" | "other" | null;
@@ -259,6 +261,10 @@ export interface UsageDay {
   in: number;
   out: number;
   think: number;
+  /** Part of `in` served from the provider's prompt cache (cache_tok on a
+   * ledger line). Only the usage ledger carries it, so days counted from
+   * mind-log stamps have 0. */
+  cache: number;
   /** Where calls/tokens came from: the bin/llm ledger (every call) or the
    * mind log's reasoning-step stamps (shellm runs only, older days). */
   source: "ledger" | "mindlog";
@@ -269,6 +275,8 @@ export interface UsageModel {
   in: number;
   out: number;
   think: number;
+  /** Part of `in` served from the prompt cache; hit rate is cache / in. */
+  cache: number;
 }
 
 export interface Usage {
@@ -289,6 +297,7 @@ export interface Usage {
     in: number;
     out: number;
     think: number;
+    cache: number;
     calls: number;
     in_msg: number;
     out_msg: number;

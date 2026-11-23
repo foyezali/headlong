@@ -227,10 +227,77 @@ find_skill() {
 # Requirements parsing & checking
 # ---------------------------------------------------------------------------
 
+# Read a YAML list value for KEY from frontmatter on stdin as a JSON array.
+# Understands a JSON flow list (["a", "b"]), an unquoted YAML flow list
+# ([a, b]) and a block list ("- a" lines under the key). Only looks at keys
+# after a `requires:` line, so an unrelated `os:` elsewhere in the frontmatter
+# cannot be mistaken for a requirement. Prints "[]" when the key is absent or
+# malformed, and never fails: this runs under `set -e -o pipefail` for a
+# caller that must keep listing skills even when one has a bad requirement.
+_yaml_list() {
+    local key="$1" raw
+    raw=$(awk -v key="$key" '
+        BEGIN { SQ = sprintf("%c", 39); DQ = sprintf("%c", 34); in_list = 0; seen_req = 0 }
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        function unquote(s,   c1, c2) {
+            s = trim(s)
+            if (length(s) >= 2) {
+                c1 = substr(s, 1, 1); c2 = substr(s, length(s), 1)
+                if ((c1 == DQ && c2 == DQ) || (c1 == SQ && c2 == SQ)) s = trim(substr(s, 2, length(s) - 2))
+            }
+            return s
+        }
+        {
+            if (in_list) {
+                if ($0 ~ /^[[:space:]]*-[[:space:]]*/) {
+                    item = $0
+                    sub(/^[[:space:]]*-[[:space:]]*/, "", item)
+                    item = unquote(item)
+                    if (item != "") print item
+                    next
+                }
+                exit
+            }
+            if ($0 ~ /^[[:space:]]+requires:[[:space:]]*$/) { seen_req = 1; next }
+            if (!seen_req) next
+            if ($0 ~ ("^[[:space:]]+" key ":[[:space:]]*")) {
+                line = $0
+                sub("^[[:space:]]+" key ":[[:space:]]*", "", line)
+                line = trim(line)
+                if (line ~ /^\[/) {
+                    sub(/^\[/, "", line); sub(/\][[:space:]]*$/, "", line)
+                    n = split(line, parts, ",")
+                    for (i = 1; i <= n; i++) {
+                        p = unquote(parts[i])
+                        if (p != "") print p
+                    }
+                    exit
+                }
+                if (line != "") { print unquote(line); exit }
+                in_list = 1
+            }
+        }
+    ') || true
+
+    if [[ -z "$raw" ]]; then
+        printf '[]\n'
+        return 0
+    fi
+    printf '%s\n' "$raw" | jq -R . | jq -sc . 2>/dev/null || printf '[]\n'
+    return 0
+}
+
 # Extract metadata.shelllm block from SKILL.md frontmatter as JSON.
-# Supports inline JSON (metadata: {"shelllm": {...}}) and multi-line YAML.
+# Supports inline JSON (metadata: {"shelllm": {...}}) and multi-line YAML,
+# where each requires list may be a JSON flow list, an unquoted YAML flow list,
+# or a block list of "- item" lines.
 # Returns JSON: {"requires":{"env":[],"bins":[],"anyBins":[],"os":[]}}
 # Returns "{}" if no metadata.shelllm block found.
+#
+# Before 2026-11-23 only the JSON flow form was understood, which meant a skill
+# written in ordinary YAML (bins: then "- jq") had its requirements silently
+# ignored and always listed as eligible, and an unquoted flow list made jq
+# fail and took `skills list` down with exit 2 partway through its output.
 _extract_shelllm_meta() {
     local file="$1"
     [[ -f "$file" ]] || { echo '{}'; return; }
@@ -252,25 +319,28 @@ _extract_shelllm_meta() {
         return
     fi
 
-    # Multi-line YAML: extract requires fields by grepping indented lines.
-    # Arrays use JSON bracket notation ["a", "b"], so jq can parse them directly.
     local env_val bins_val anybins_val os_val
-    env_val=$(printf '%s\n' "$frontmatter" | awk '/^[[:space:]]+env:/{sub(/.*env:[[:space:]]*/, ""); print; exit}')
-    bins_val=$(printf '%s\n' "$frontmatter" | awk '/^[[:space:]]+bins:/{sub(/.*bins:[[:space:]]*/, ""); print; exit}')
-    anybins_val=$(printf '%s\n' "$frontmatter" | awk '/^[[:space:]]+anyBins:/{sub(/.*anyBins:[[:space:]]*/, ""); print; exit}')
-    os_val=$(printf '%s\n' "$frontmatter" | awk '/^[[:space:]]+os:/{sub(/.*os:[[:space:]]*/, ""); print; exit}')
+    env_val=$(printf '%s\n' "$frontmatter" | _yaml_list env)
+    bins_val=$(printf '%s\n' "$frontmatter" | _yaml_list bins)
+    anybins_val=$(printf '%s\n' "$frontmatter" | _yaml_list anyBins)
+    os_val=$(printf '%s\n' "$frontmatter" | _yaml_list os)
 
-    # If nothing found, return empty
-    if [[ -z "$env_val" && -z "$bins_val" && -z "$anybins_val" && -z "$os_val" ]]; then
+    if [[ "$env_val" == '[]' && "$bins_val" == '[]' && "$anybins_val" == '[]' && "$os_val" == '[]' ]]; then
+        # A one-line flow mapping (requires: {bins: [jq]}) is valid YAML this
+        # reader does not parse. Ignoring it silently would mark the skill
+        # eligible and load a playbook whose tools are missing, so say so.
+        if printf '%s\n' "$frontmatter" | grep -qE '^[[:space:]]+requires:[[:space:]]*\{'; then
+            printf 'skills: warning: %s has an inline requires: {…} mapping this reader cannot parse; requirements ignored. Use a block list (see skills/skill-author).\n' "$file" >&2
+        fi
         echo '{}'
         return
     fi
 
     jq -n \
-        --argjson env "${env_val:-[]}" \
-        --argjson bins "${bins_val:-[]}" \
-        --argjson anybins "${anybins_val:-[]}" \
-        --argjson os "${os_val:-[]}" \
+        --argjson env "$env_val" \
+        --argjson bins "$bins_val" \
+        --argjson anybins "$anybins_val" \
+        --argjson os "$os_val" \
         '{requires: {env: $env, bins: $bins, anyBins: $anybins, os: $os}}'
 }
 
@@ -436,7 +506,15 @@ action_list_json() {
             name=$(frontmatter_field "${skill_dir}SKILL.md" "name")
             desc=$(frontmatter_field "${skill_dir}SKILL.md" "description")
             [[ -z "$name" ]] && name=$(basename "$skill_dir")
-            body=$(sed -n '/^---$/,/^---$/d; p' "${skill_dir}SKILL.md")
+            # Skip the first frontmatter block only. The old form was a sed
+            # range from --- to ---, which restarted at every later --- in the
+            # body (a horizontal ruler, a pasted block), so list-json silently
+            # truncated any skill whose body contained one.
+            body=$(awk '
+                NR==1 && /^---$/ { infm = 1; next }
+                infm && /^---$/  { infm = 0; next }
+                !infm            { print }
+            ' "${skill_dir}SKILL.md")
 
             [[ "$first" -eq 1 ]] && first=0 || printf ','
             jq -n --arg n "$name" --arg d "$desc" --arg b "$body" \

@@ -192,9 +192,16 @@ _render_steps() {
     # BEFORE rendering, then renders exactly that many lines — steps appended
     # mid-render would otherwise land in the TSV above the recorded
     # high-water mark and duplicate on the next incremental pass.
+    # pipefail off for this pipeline only: when $limit is set, `head` exits
+    # early and `tail` takes SIGPIPE, which under pipefail would fail the whole
+    # call even though jq produced every row it was asked for. The status that
+    # matters is jq's, and it is returned below.
+    local rc=0 _pf=0
+    case "$-" in *f*) _pf=1 ;; esac
+    set +o pipefail
     tail -n "+$from_line" "$JSONL" \
         | { if [[ -n "$limit" ]]; then head -n "$limit"; else cat; fi; } \
-        | jq -r --argjson keep "$KEEP_TYPES" --argjson off "$((from_line - 1))" '
+        | jq -Rr --argjson keep "$KEEP_TYPES" --argjson off "$((from_line - 1))" '
         def epoch_min:
           (tostring
            | capture("^(?<y>[0-9]{4})-(?<mo>[0-9]{2})-(?<d>[0-9]{2})T(?<h>[0-9]{2}):(?<mi>[0-9]{2})(:[0-9]{2})?([.][0-9]+)?(?<tz>Z|[+-][0-9]{4})?")
@@ -212,8 +219,18 @@ _render_steps() {
                     else 0 end))
               | tostring
             end;
-        select(type == "object") |
-        select(.type as $t | $keep | index($t)) |
+        # One raw line at a time: a single malformed line (a torn append, a
+        # half-written JSON object) must not truncate every step after it.
+        # Plain `jq -r` aborts at the first parse error, and because
+        # _render_cached then records the whole raw line count as rendered,
+        # rows past the bad line were lost permanently and silently.
+        select(test("^[[:space:]]*$") | not)
+        | . as $raw
+        | (try ($raw | fromjson)
+           catch (("recap: skipping malformed raw line \(input_line_number + $off)\n" | stderr)
+                  | empty))
+        | select(type == "object")
+        | select(.type as $t | $keep | index($t)) |
         select(.source != "seed") |
         [
             (input_line_number + $off),
@@ -247,7 +264,9 @@ _render_steps() {
             ),
             ((.ts // "") | epoch_min)
         ] | @tsv
-    ' 2>/dev/null || true
+    ' || rc=$?
+    (( _pf )) && set -o pipefail
+    return "$rc"
 }
 
 # Emit "start end reason" window ranges over the rendered TSV. A window
@@ -898,8 +917,17 @@ _render_cached() {
     fi
     if [[ "$meta_ver" != "$RENDER_VERSION" || "$meta_keep" != "$KEEP_TYPES" \
           || ! "$done_lines" =~ ^[0-9]+$ || "$done_lines" -gt "$raw_lines" ]]; then
-        _render_steps 1 "$raw_lines" > "$RENDERED_TSV.tmp"
-        mv "$RENDERED_TSV.tmp" "$RENDERED_TSV"
+        # A render that fails must not be installed and must not advance the
+        # recorded mark: the next call then re-renders the gap instead of
+        # treating a truncated TSV as complete for the rest of the log's life.
+        if _render_steps 1 "$raw_lines" > "$RENDERED_TSV.tmp"; then
+            mv "$RENDERED_TSV.tmp" "$RENDERED_TSV"
+        else
+            rm -f "$RENDERED_TSV.tmp"
+            [[ -f "$RENDERED_TSV" ]] || : > "$RENDERED_TSV"
+            note "render failed; keeping the previous cache and retrying next call"
+            return 0
+        fi
     elif (( done_lines < raw_lines )); then
         # A crash between a previous append and its meta write leaves rows
         # above the recorded mark; drop them first or they would duplicate.
@@ -908,7 +936,13 @@ _render_cached() {
             awk -F'\t' -v max="$done_lines" '$1 + 0 <= max' "$RENDERED_TSV" > "$RENDERED_TSV.tmp"
             mv "$RENDERED_TSV.tmp" "$RENDERED_TSV"
         fi
-        _render_steps "$((done_lines + 1))" "$((raw_lines - done_lines))" >> "$RENDERED_TSV"
+        # Same rule for the incremental append: rows above the recorded mark
+        # are dropped and re-rendered on the next call, so a failed append
+        # cannot leave a hole in the middle of the TSV.
+        if ! _render_steps "$((done_lines + 1))" "$((raw_lines - done_lines))" >> "$RENDERED_TSV"; then
+            note "render of new lines failed; not advancing the cache mark"
+            return 0
+        fi
     fi
     jq -n --argjson v "$RENDER_VERSION" --arg keep "$KEEP_TYPES" \
         --argjson lines "$raw_lines" --arg u "$(date +%Y-%m-%dT%H:%M:%S)" \
