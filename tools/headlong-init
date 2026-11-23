@@ -1182,14 +1182,15 @@ _operator_blurb() {
 # _write_memory <mem_dir> <type> <summary> <body>
 _write_memory() {
     local mem_dir="$1" mtype="$2" summary="$3" body="$4"
-    local id slug fname
+    local id slug fname summary_yaml
+    summary_yaml="'${summary//\'/\'\'}'"
     id=$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')
     slug=$(printf '%s' "$summary" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-70)
     fname="$mem_dir/$(date +%Y-%m-%d-%H-%M-%S)_${id}_${slug}.md"
     cat > "$fname" <<EOF
 ---
 id: $id
-summary: $summary
+summary: $summary_yaml
 type: $mtype
 created: $(date '+%Y-%m-%d %H:%M:%S')
 ---

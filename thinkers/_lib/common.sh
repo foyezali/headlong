@@ -240,7 +240,21 @@ _outbound_section() {
 # later, and only the latest open window is ever due, so an outage costs one
 # post, not one per lost window. Local HH:MM strings and minutes of the day
 # only: no date parsing, so GNU and BSD date both work.
-_fm() { awk -v k="$2: " 'NR==1 && /^---$/{f=1; next} f && /^---$/{exit} f && index($0, k)==1{print substr($0, length(k)+1)}' "$1"; }
+# A leading frontmatter scalar. Values bin/mem considers ambiguous are stored as
+# YAML single-quoted scalars (its yaml_scalar), so undo that here; the doubled
+# quote is the only escape a single-quoted scalar has.
+_fm_unquote() {
+    local v
+    while IFS= read -r v; do
+        if [[ "$v" == \'*\' && ${#v} -ge 2 ]]; then
+            v="${v:1:${#v}-2}"; v="${v//\'\'/\'}"
+        elif [[ "$v" == \"*\" && ${#v} -ge 2 ]]; then
+            v="${v:1:${#v}-2}"; v="${v//\\/\\}"; v="${v//\\\"/\"}"
+        fi
+        printf '%s\n' "$v"
+    done
+}
+_fm() { awk -v k="$2: " 'NR==1 && /^---$/{f=1; next} f && /^---$/{exit} f && index($0, k)==1{print substr($0, length(k)+1)}' "$1" | _fm_unquote; }
 _schedule_signals() {
     local mem_dir="${1:-$MEM_DIR}" tz="${HEADLONG_TZ:-UTC}" grace="${SCHEDULE_GRACE_MIN:-360}"
     local f sched gtz until id title day now now_m zone sent t t_m key at due next said

@@ -44,7 +44,11 @@ def _frontmatter(text: str) -> dict[str, str]:
         value = value.strip()
         if not key or not value:
             continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        if len(value) >= 2 and value[0] == value[-1] == "'":
+            # YAML single-quoted scalar (what bin/mem writes for an ambiguous
+            # summary); the only escape is a doubled quote.
+            value = value[1:-1].replace("''", "'")
+        elif len(value) >= 2 and value[0] == value[-1] == '"':
             value = value[1:-1]
         fields[key] = value
     return fields

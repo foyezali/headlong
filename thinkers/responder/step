@@ -608,6 +608,9 @@ Now: $(date -u +%Y-%m-%dT%H:%MZ). Output the rewritten notes."
     local now summary
     now=$(date +"%Y-%m-%d %H:%M:%S")
     summary="Notes on $person: $(printf '%s' "$new_body" | head -1 | cut -c1-60)"
+    # "Notes on <person>: ..." is always ambiguous YAML (": " is a mapping), so
+    # write it as a single-quoted scalar; bin/mem's readers undo the doubling.
+    summary="'${summary//\'/\'\'}'"
     if [[ -n "$prev_file" ]]; then
         # Rewrite in place, keeping id/created/person_key/aliases as they are.
         local fm id created aliases_block

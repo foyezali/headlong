@@ -14,11 +14,21 @@ mem_dir="${1:-${MEM_DIR:?MEM_DIR not set}}"
 out="${2:-${RETRIEVAL_INDEX:-${IDENTITY_DIR:?IDENTITY_DIR not set}/retrieval/index.tsv}}"
 mkdir -p "$(dirname "$out")"
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+# Undo the quoting bin/mem's yaml_scalar adds to an ambiguous scalar.
+_unquote() {
+    local v="$1"
+    if [[ "$v" == \'*\' && ${#v} -ge 2 ]]; then
+        v="${v:1:${#v}-2}"; v="${v//\'\'/\'}"
+    elif [[ "$v" == \"*\" && ${#v} -ge 2 ]]; then
+        v="${v:1:${#v}-2}"; v="${v//\\/\\}"; v="${v//\\\"/\"}"
+    fi
+    printf '%s' "$v"
+}
 for f in "$mem_dir"/*.md; do
     [[ -f "$f" ]] || continue
-    mid=$(sed -n 's/^id:[[:space:]]*//p' "$f" | head -1)
+    mid=$(_unquote "$(sed -n 's/^id:[[:space:]]*//p' "$f" | head -1)")
     [[ -n "$mid" ]] || continue
-    summary=$(sed -n 's/^summary:[[:space:]]*//p' "$f" | head -1 | tr '\t' ' ')
+    summary=$(_unquote "$(sed -n 's/^summary:[[:space:]]*//p' "$f" | head -1 | tr '\t' ' ')")
     # body lines plus the summary line; the rest of the frontmatter is skipped
     awk 'NR==1 && /^---$/ {f=1; next} f && /^---$/ {f=0; next} !f || /^summary:/' "$f" \
         | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' \

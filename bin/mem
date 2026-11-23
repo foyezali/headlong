@@ -60,6 +60,38 @@ debug() {
     fi
 }
 
+# A YAML-safe scalar for values we write into frontmatter. Summaries are free
+# text typed by whoever stores the memory, so one can contain ": ", start with
+# "#", begin or end with a space, or plain-parse as a number or boolean; written
+# raw, 45 of ada's 85 memories came back unparseable or null from a real YAML
+# parser. Ambiguous values are written as a YAML single-quoted scalar, whose
+# only escape is a doubled quote, so backslashes and double quotes stay literal.
+# Unambiguous values stay plain so stored bytes do not churn.
+yaml_scalar() {
+    local v="$1"
+    local bad=0
+    [[ -n "$v" && "$v" == [[:space:]]* ]] && bad=1
+    [[ "$v" == *[[:space:]] ]] && bad=1
+    [[ "$v" == "#"* ]] && bad=1
+    [[ "$v" == *": "* || "$v" == *":" ]] && bad=1
+    [[ "$v" == *" #"* ]] && bad=1
+    [[ "$v" == "~" || "$v" == "null" || "$v" == "true" || "$v" == "false" ]] && bad=1
+    [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && bad=1
+    [[ "$v" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]] && bad=1
+    [[ "$v" == *$'\t'* ]] && bad=1
+    case "$v" in
+        -\ *|-|?\ *) bad=1 ;;
+        \[*|\]*|\{*|\}*|\&*|\**|\!*|\|*|">"*|%*|@*|\`*) bad=1 ;;
+        -|-) bad=1 ;;
+        ---*|...*) bad=1 ;;
+    esac
+    if [[ "$bad" -eq 1 ]]; then
+        printf "'%s'" "${v//\'/\'\'}"
+    else
+        printf '%s' "$v"
+    fi
+}
+
 slugify() {
     local text="$1"
     printf '%s' "$text" \
@@ -72,20 +104,32 @@ slugify() {
 # Extract a field from YAML frontmatter.
 # Usage: frontmatter_field <file> <field>
 frontmatter_field() {
-    local file="$1" field="$2"
+    local file="$1" field="$2" v
     # Only the FIRST frontmatter block counts. The old reader took a sed range
     # from the first --- to any later ---, so a memory whose body contains a
     # ruler had its body lines read as header fields: a body "until: 1999-01-01"
     # after a ruler became the memory's until. thinkers/_lib/common.sh (_fm) and
     # the dashboard's memories.py both scope to the first block; this now does
     # too, with an explicit open/close flag rather than a line range.
-    awk -v k="${field}:" '
+    v=$(awk -v k="${field}:" '
         NR==1 && /^---$/ { inb=1; next }
         inb && /^---$/ { exit }
         inb && index($0, k)==1 { print substr($0, length(k)+1); exit }
-    ' "$file" 2>/dev/null \
-        | sed 's/^[[:space:]]*//' \
-        | sed "s/^[\"']\(.*\)[\"']$/\1/" || true
+    ' "$file" 2>/dev/null) || true
+    v="${v#"${v%%[![:space:]]*}"}"
+    # Undo a YAML quoted scalar. bin/mem writes ambiguous values as single-
+    # quoted scalars, whose only escape is a doubled quote; a double-quoted
+    # scalar needs backslash unescaping. Unquoted values pass through, which
+    # keeps old files and hand-written fixtures reading as they always did.
+    if [[ "$v" == \'*\' && ${#v} -ge 2 ]]; then
+        v="${v:1:${#v}-2}"
+        v="${v//\'\'/\'}"
+    elif [[ "$v" == \"*\" && ${#v} -ge 2 ]]; then
+        v="${v:1:${#v}-2}"
+        v="${v//\\\\/\\}"
+        v="${v//\\\\\"/\"}"
+    fi
+    printf '%s\n' "$v"
 }
 
 # Resolve a NAME against the slug in <ts>_<hex>_<slug>.md names: exact slug
@@ -311,12 +355,13 @@ action_add() {
     # Drain the body so upstream writers cannot fail with SIGPIPE.
     summary=$(printf '%s' "$text" | sed '/^[[:space:]]*$/d' | sed -n '1p' | cut -c1-80)
     warn_flag_summary "$summary"
+    local summary_yaml; summary_yaml=$(yaml_scalar "$summary")
     created=$(date +"%Y-%m-%d %H:%M:%S")
 
     cat > "$MEM_DIR/${filename}.md" << EOF
 ---
 id: $hex
-summary: $summary
+summary: $summary_yaml
 type: $MEM_TYPE
 created: $created${MEM_UNTIL:+
 until: $MEM_UNTIL}${MEM_SCHEDULE:+
@@ -769,6 +814,7 @@ action_edit() {
         updated_block=$(printf 'updated: %s' "$now")
     fi
 
+    local summary_yaml; summary_yaml=$(yaml_scalar "$summary")
     local id_line="" until_line=""
     [[ -n "$id" ]] && id_line="id: $id
 "
@@ -787,7 +833,7 @@ action_edit() {
 
     cat > "$file" << EOF
 ---
-${id_line}summary: $summary
+${id_line}summary: $summary_yaml
 type: $type
 created: $created
 ${preserved_block}${until_line}$updated_block
