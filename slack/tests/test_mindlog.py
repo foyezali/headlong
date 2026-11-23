@@ -143,3 +143,53 @@ def test_follow_creates_missing_cursor_parent(tmp_path):
         assert cursor.parent.is_dir()
     finally:
         gen.close()
+
+
+def test_follow_does_not_resume_mid_row_after_an_in_place_rewrite(tmp_path):
+    """A log rewritten in place that comes out LONGER (compaction, an import, a
+    restored backup) used to keep its byte offset and resume in the middle of a
+    row: one part of a message re-sent, everything before the old offset never
+    read, no error anywhere. The cursor now records a signature of the bytes
+    before its offset and is distrusted when they change."""
+    traj = tmp_path / "trajectory.jsonl"
+    old = [{"content": f"old {i}"} for i in range(4)]
+    for step in old:
+        _append(traj, step)
+    off = traj.stat().st_size
+    cursor = tmp_path / "cursor"
+    cursor.write_text(f"{off} {traj.resolve()}")
+    traj.write_text("".join(json.dumps(dict(s, pad="x" * 20)) + "\n" for s in old))
+
+    def _later():
+        time.sleep(0.05)
+        _append(traj, {"content": "fresh"})
+
+    threading.Thread(target=_later, daemon=True).start()
+    gen = follow(traj, cursor, poll_interval=0.01)
+    try:
+        assert next(gen)["content"] == "fresh"
+    finally:
+        gen.close()
+
+
+def test_follow_cursor_carries_a_signature_and_stays_incremental(tmp_path):
+    """An append must still resume where the cursor left off, and the cursor
+    has to name what it read."""
+    traj = tmp_path / "trajectory.jsonl"
+    _append(traj, {"content": "seen"})
+    cursor = tmp_path / "cursor"
+
+    def _later():
+        time.sleep(0.05)
+        _append(traj, {"content": "one"})
+
+    threading.Thread(target=_later, daemon=True).start()
+    gen = follow(traj, cursor, poll_interval=0.01)
+    try:
+        assert next(gen)["content"] == "one"
+    finally:
+        gen.close()
+    fields = cursor.read_text().split()
+    assert len(fields) == 5, fields
+    assert fields[1] == str(traj.resolve())
+    assert int(fields[0]) == traj.stat().st_size
