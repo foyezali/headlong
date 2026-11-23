@@ -1265,7 +1265,21 @@ _start_dispatcher() {
                 # "wake again" matters — last-wins, one pending file, so a
                 # perpetual-loop thinker never builds a backlog of stale
                 # wakeups it then burns tokens draining.
-                if _thinker_busy "$_name"; then
+                # A step must not overtake a queued message/action of its
+                # own name. The queue is drained by the 1s tick, so when the
+                # step that frees the thinker finishes and the next step
+                # arrives in the same second, the arrival used to dispatch
+                # ahead of the queue: the record replayed A, C, B
+                # (test_thinkers_pending scenario 2, 2026-11-23). Now an
+                # arrival with anything still queued joins the back of that
+                # queue and the drain runs immediately, so FIFO holds
+                # whether the tick or the arrival gets there first.
+                _pend_waiting=0
+                for _pf in "$run_dir/pending/${_name}.message."* \
+                           "$run_dir/pending/${_name}.action."*; do
+                    if [[ -f "$_pf" ]]; then _pend_waiting=1; break; fi
+                done
+                if [[ "$_pend_waiting" -eq 1 ]] || _thinker_busy "$_name"; then
                     case "$_step_type" in
                         message|action)
                             _pend_count=0
@@ -1304,6 +1318,7 @@ _start_dispatcher() {
                             printf '%s [dispatcher]   pending -> %s (type=%s, coalesced)\n' "$(date -u +%FT%TZ)" "$_name" "$_step_type" >&2
                             ;;
                     esac
+                    _fire_pending
                     continue
                 fi
 
