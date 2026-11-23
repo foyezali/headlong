@@ -213,10 +213,67 @@ _llm_health_warn() {
     return 0
 }
 
+
+# --- liveness ---------------------------------------------------------------
+# _pid_alive PID [PIDFILE] — is this process really alive?
+#
+# kill -0 succeeds for a process that has exited but has not been reaped (a
+# zombie), so a bare kill -0 calls a corpse "running". That is not
+# hypothetical on this box: the container's PID 1 is `sleep infinity`, which
+# never reaps, so a thinker or bridge that dies stays a zombie indefinitely
+# and its pid keeps answering kill -0. `persona status` would then report a
+# dead dispatcher as running forever.
+#
+# A pid can also stop meaning what a pid file meant: the kernel hands pid
+# numbers out again once its counter wraps, so a stale file can name an
+# unrelated younger process. It has already wrapped here. When PIDFILE is
+# given, the process must also have started no later than that file was
+# written; a recycled pid always belongs to something that started after.
+#
+# The function is self-contained on purpose, reading its cache with ${x:-}:
+# a caller that sources or evals just this one function (the tests do) must
+# not die on an unset variable, and a missing piece must never read as "alive"
+# the way a failed helper call did in the first draft of this.
+#
+# Hosts without /proc (macOS dev) have neither hazard we can check, so they
+# fall back to kill -0 alone.
+_PID_BOOT="${_PID_BOOT:-}"; _PID_HZ="${_PID_HZ:-}"
+_pid_alive() {
+    local pid="${1:-}" ref="${2:-}" line start started mt up
+    local boot="${_PID_BOOT:-}" hz="${_PID_HZ:-}"
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    [[ -r "/proc/$pid/stat" ]] || return 0     # no /proc: trust kill -0
+    read -r line < "/proc/$pid/stat" 2>/dev/null || return 0
+    line="${line##*') '}"                      # comm may itself contain ') '
+    # After comm the fields are state, ppid, ... so starttime (field 22 of
+    # the whole line) is the 20th field here.
+    set -- $line
+    [[ "${1:-}" == "Z" ]] && return 1          # exited, not yet reaped
+    [[ -n "$ref" ]] || return 0
+    start="${20:-}"
+    [[ -n "$start" ]] || return 0
+    if [[ -z "$boot" || -z "$hz" ]]; then
+        read -r up _ < /proc/uptime 2>/dev/null || return 0
+        hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+        boot=$(awk -v n="$(date +%s)" -v u="$up" 'BEGIN{print int(n-u)}')
+        _PID_BOOT="$boot"; _PID_HZ="$hz"
+    fi
+    started=$(awk -v b="$boot" -v s="$start" -v h="$hz" \
+        'BEGIN{print int(b + s/h)}')
+    mt=$(stat -c %Y "$ref" 2>/dev/null) || return 0
+    # Two seconds of slack: starttime is whole ticks and the boot epoch is
+    # truncated, so a process and its pid file written in the same instant
+    # must not look recycled. Real recycling is minutes or hours off.
+    [[ "$started" -le $((mt + 2)) ]] || return 1
+    return 0
+}
+
 _dispatcher_pid() {
     local pid
     pid=$(cat "$IDENTITY_ROOT/$NAME/run/dispatcher.pid" 2>/dev/null || true)
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid" && return 0
+    [[ -n "$pid" ]] && _pid_alive "$pid" "$IDENTITY_ROOT/$NAME/run/dispatcher.pid" \
+        && printf '%s' "$pid" && return 0
     return 1
 }
 
@@ -285,7 +342,7 @@ cmd_status() {
     fi
     local wpid
     wpid=$(cat "$SHELLM_HOME/run/web.pid" 2>/dev/null || true)
-    if [[ -n "$wpid" ]] && kill -0 "$wpid" 2>/dev/null; then
+    if _pid_alive "${wpid:-}" "$SHELLM_HOME/run/web.pid"; then
         echo "dash: $(grep -o 'http://[^ ]*' "$SHELLM_HOME/logs/web.log" 2>/dev/null | tail -1)"
     else
         echo "dash: stopped   (open with: $CMD dash)"
@@ -306,7 +363,7 @@ _dash_start() {
     local log="$SHELLM_HOME/logs/web.log" pidfile="$SHELLM_HOME/run/web.pid" pid url
     mkdir -p "$SHELLM_HOME/logs" "$SHELLM_HOME/run"
     pid=$(cat "$pidfile" 2>/dev/null || true)
-    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    if ! _pid_alive "${pid:-}" "$pidfile"; then
         command -v uv >/dev/null 2>&1 || { echo "the dash needs uv — run headlong-init to set it up" >&2; return 1; }
         # In a container, bind on all interfaces so a published port works
         if [[ -z "${SHELLM_WEB_ARGS:-}" && ( -f /.dockerenv || -f /run/.containerenv ) ]]; then
@@ -320,7 +377,7 @@ _dash_start() {
         local _
         for _ in $(seq 1 300); do
             grep -qE '(shellm|shelly|headlong)-web serving' "$log" 2>/dev/null && break
-            kill -0 "$(cat "$pidfile")" 2>/dev/null || { tail -20 "$log" >&2; echo "the dash failed to start (log: $log)" >&2; return 1; }
+            _pid_alive "$(cat "$pidfile" 2>/dev/null || true)" "$pidfile" || { tail -20 "$log" >&2; echo "the dash failed to start (log: $log)" >&2; return 1; }
             sleep 1
         done
     fi
@@ -348,12 +405,15 @@ _dash_wait_ready() {
 _dash_stop() {
     local pidfile="$SHELLM_HOME/run/web.pid" pid
     pid=$(cat "$pidfile" 2>/dev/null || true)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    if _pid_alive "${pid:-}" "$pidfile"; then
         echo "Stopping the dash (PID $pid)..."
         _kill_tree "$pid" TERM
         local _
-        for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
-        kill -0 "$pid" 2>/dev/null && _kill_tree "$pid" KILL
+        # A process that has exited but not been reaped is dead; waiting on
+        # kill -0 here burned the whole 5s budget on a corpse and then sent
+        # KILL to it.
+        for _ in $(seq 1 20); do _pid_alive "$pid" "$pidfile" || break; sleep 0.25; done
+        _pid_alive "$pid" "$pidfile" && _kill_tree "$pid" KILL
     fi
     rm -f "$pidfile"
     return 0

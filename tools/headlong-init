@@ -1396,13 +1396,69 @@ _prebuild_dash() {
     PREBUILD_PID=$!
 }
 
+
+# --- liveness ---------------------------------------------------------------
+# _pid_alive PID [PIDFILE] — is this process really alive?
+#
+# kill -0 succeeds for a process that has exited but has not been reaped (a
+# zombie), so a bare kill -0 calls a corpse "running". That is not
+# hypothetical on this box: the container's PID 1 is `sleep infinity`, which
+# never reaps, so a thinker or bridge that dies stays a zombie indefinitely
+# and its pid keeps answering kill -0. `persona status` would then report a
+# dead dispatcher as running forever.
+#
+# A pid can also stop meaning what a pid file meant: the kernel hands pid
+# numbers out again once its counter wraps, so a stale file can name an
+# unrelated younger process. It has already wrapped here. When PIDFILE is
+# given, the process must also have started no later than that file was
+# written; a recycled pid always belongs to something that started after.
+#
+# The function is self-contained on purpose, reading its cache with ${x:-}:
+# a caller that sources or evals just this one function (the tests do) must
+# not die on an unset variable, and a missing piece must never read as "alive"
+# the way a failed helper call did in the first draft of this.
+#
+# Hosts without /proc (macOS dev) have neither hazard we can check, so they
+# fall back to kill -0 alone.
+_PID_BOOT="${_PID_BOOT:-}"; _PID_HZ="${_PID_HZ:-}"
+_pid_alive() {
+    local pid="${1:-}" ref="${2:-}" line start started mt up
+    local boot="${_PID_BOOT:-}" hz="${_PID_HZ:-}"
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    [[ -r "/proc/$pid/stat" ]] || return 0     # no /proc: trust kill -0
+    read -r line < "/proc/$pid/stat" 2>/dev/null || return 0
+    line="${line##*') '}"                      # comm may itself contain ') '
+    # After comm the fields are state, ppid, ... so starttime (field 22 of
+    # the whole line) is the 20th field here.
+    set -- $line
+    [[ "${1:-}" == "Z" ]] && return 1          # exited, not yet reaped
+    [[ -n "$ref" ]] || return 0
+    start="${20:-}"
+    [[ -n "$start" ]] || return 0
+    if [[ -z "$boot" || -z "$hz" ]]; then
+        read -r up _ < /proc/uptime 2>/dev/null || return 0
+        hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+        boot=$(awk -v n="$(date +%s)" -v u="$up" 'BEGIN{print int(n-u)}')
+        _PID_BOOT="$boot"; _PID_HZ="$hz"
+    fi
+    started=$(awk -v b="$boot" -v s="$start" -v h="$hz" \
+        'BEGIN{print int(b + s/h)}')
+    mt=$(stat -c %Y "$ref" 2>/dev/null) || return 0
+    # Two seconds of slack: starttime is whole ticks and the boot epoch is
+    # truncated, so a process and its pid file written in the same instant
+    # must not look recycled. Real recycling is minutes or hours off.
+    [[ "$started" -le $((mt + 2)) ]] || return 1
+    return 0
+}
+
 _start_dash() {
     [[ "${HEADLONG_NO_DASH:-0}" != "1" ]] || { info "Skipping the dash (HEADLONG_NO_DASH=1)"; return 0; }
     _ensure_dash_deps || { DASH_STATUS="failed"; return 0; }
 
     local log="$HEADLONG_HOME/logs/web.log" pidfile="$HEADLONG_HOME/run/web.pid" pid
     pid=$(cat "$pidfile" 2>/dev/null || true)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    if _pid_alive "${pid:-}" "$pidfile"; then
         DASH_URL=$(grep -o 'http://[^ ]*' "$log" 2>/dev/null | tail -1 || true)
         DASH_STATUS="ok"
         info "Dash already running${DASH_URL:+ at $DASH_URL}"
@@ -1521,7 +1577,8 @@ fi
 # the pid files under run/ are the live source of truth.
 DISPATCHER_PIDFILE="$IDENTITY_ROOT/$NAME/run/dispatcher.pid"
 DISPATCHER_PID=$(cat "$DISPATCHER_PIDFILE" 2>/dev/null || true)
-[[ -n "$DISPATCHER_PID" ]] && kill -0 "$DISPATCHER_PID" 2>/dev/null || DISPATCHER_PID=""
+[[ -n "$DISPATCHER_PID" ]] && _pid_alive "$DISPATCHER_PID" "$DISPATCHER_PIDFILE" \
+    || DISPATCHER_PID=""
 jq -n \
     --arg identity "$NAME" \
     --arg cmd "$PERSONA_CMD" \
