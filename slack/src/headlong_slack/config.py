@@ -125,21 +125,55 @@ def load(serve_root: Path) -> Config:
 
 
 def _peer_bot_users() -> frozenset[str]:
-    """SLACK_PEER_BOT_USERS: comma-separated bot user ids (U...) of peers.
+    """SLACK_PEER_BOT_USERS: bot user ids (U.../W...) of peers, any separator.
 
     Anything that is not a Slack user id is ignored, so a stray bot id
     (B...) or a display name cannot open the gate by accident.
     """
     raw = os.environ.get("SLACK_PEER_BOT_USERS", "")
     ids = set()
-    for part in raw.replace(";", ",").split(","):
-        part = part.strip()
-        if part and part[0] in "UW" and part.isalnum() and part == part.upper():
+    # Commas, semicolons and whitespace (spaces, tabs, newlines) all separate
+    # ids. Splitting on commas alone read "U0AAA U0BBB" as one token, which is
+    # not a user id, so the whole variable parsed to the empty set: peer
+    # hearing silently off, nothing said anywhere.
+    parts = raw.replace(";", ",").replace(",", " ").split()
+    rejected = []
+    for part in parts:
+        if part[0] in "UW" and part.isalnum() and part == part.upper():
             ids.add(part)
+        else:
+            rejected.append(part)
+    # A configured-but-empty peer list is the outcome this variable must never
+    # reach quietly: every bot post is dropped, so nothing arrives and nothing
+    # says why. Name the tokens that were tossed so a lowercase id or a display
+    # name is a message, not a mystery.
+    if raw.strip() and not ids:
+        _warn("SLACK_PEER_BOT_USERS", raw, "any Slack user id (U...)", "nobody")
+    elif rejected:
+        print(
+            "headlong-slack-bridge: SLACK_PEER_BOT_USERS ignored "
+            + ", ".join(repr(t) for t in rejected)
+            + " (not Slack user ids)",
+            file=sys.stderr,
+        )
     return frozenset(ids)
 
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _warn(name: str, raw: str, what: str, used) -> None:
+    """Say on stderr that a knob was not understood and what was used instead.
+
+    Every unparsed setting goes through here. The alternative — a silent
+    fallback — is how an operator ends up certain a setting is on when it is
+    not, and this bridge's settings are the loop guards and the peer gate.
+    """
+    print(
+        f"headlong-slack-bridge: {name}={raw!r} is not {what}; "
+        f"treating it as {used}",
+        file=sys.stderr,
+    )
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -162,11 +196,7 @@ def _bool_env(name: str, default: bool = False) -> bool:
         return True
     if word in ("0", "false", "no", "off"):
         return False
-    print(
-        f"headlong-slack-bridge: {name}={raw!r} is not a boolean (use 1/0, "
-        f"true/false, yes/no, on/off); treating it as {default}",
-        file=sys.stderr,
-    )
+    _warn(name, raw, "a boolean (1/0, true/false, yes/no, on/off)", default)
     return default
 
 
@@ -175,22 +205,20 @@ def _int_env(name: str, default: int, lo: int, hi: int) -> int:
     if raw == "":
         return default
     try:
-        n = int(raw)
+        n = int(raw.strip())
     except ValueError:
+        _warn(name, raw, "a whole number", default)
         return default
-    return max(lo, min(hi, n))
+    clamped = max(lo, min(hi, n))
+    if clamped != n:
+        _warn(name, raw, f"between {lo} and {hi}", clamped)
+    return clamped
 
 
 def _join_backfill_limit() -> int:
     """SLACK_THREAD_JOIN_BACKFILL: prior thread lines on first @mention.
 
     Default 20. 0 disables. Clamped to 50 so a long thread cannot dump.
+    Shares _int_env so a typo here is reported like every other knob.
     """
-    raw = os.environ.get("SLACK_THREAD_JOIN_BACKFILL", "")
-    if raw == "":
-        return 20
-    try:
-        n = int(raw)
-    except ValueError:
-        return 20
-    return max(0, min(50, n))
+    return _int_env("SLACK_THREAD_JOIN_BACKFILL", 20, 0, 50)

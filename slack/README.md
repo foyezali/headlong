@@ -62,11 +62,13 @@ settings take 1/true/yes/on or 0/false/no/off, and anything else is
 reported on stderr and treated as off),
 `SLACK_THREAD_JOIN_BACKFILL` (how many closest prior messages above a first @mention
 to prepend; default 20, 0 disables, max 50), and peer hearing:
-`SLACK_PEER_BOT_USERS` (comma-separated bot user ids of other Headlong
-personas whose posts may reach this mind; empty keeps every bot post
-dropped), `SLACK_PEER_MAX_TURNS` (peer messages forwarded in one thread in a
+`SLACK_PEER_BOT_USERS` (bot user ids of other Headlong personas whose
+posts may reach this mind, separated by commas, semicolons or spaces;
+empty keeps every bot post dropped), `SLACK_PEER_MAX_TURNS` (peer messages forwarded in one thread in a
 row with no person speaking; default 4) and `SLACK_PEER_HOURLY_CAP` (peer
-messages forwarded per hour; default 30). See
+messages forwarded per hour; default 30). A numeric setting that is not a
+whole number, or is outside its range, is reported on stderr and the nearest
+usable value is used. See
 [design/peer_hearing.md](../design/peer_hearing.md).
 
 For the end-to-end procedure we used to install our agent, Audel, into a

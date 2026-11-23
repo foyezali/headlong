@@ -146,3 +146,69 @@ def test_thread_followups_false_means_off(tmp_path, monkeypatch):
     assert cfg.thread_followups is False
     monkeypatch.setenv("SLACK_THREAD_FOLLOWUPS", "1")
     assert config.load(tmp_path).thread_followups is True
+
+
+# -- knobs that used to fail silently ---------------------------------------
+
+
+def test_peer_list_takes_whitespace_and_newlines(monkeypatch):
+    """A space-separated list parsed to the empty set before: the single token
+    "U0AAA U0BBB" is not a user id, so peer hearing was silently off."""
+    monkeypatch.setenv("SLACK_PEER_BOT_USERS", "U0C2G1517EC U0BN5FSURBN")
+    assert config._peer_bot_users() == frozenset({"U0C2G1517EC", "U0BN5FSURBN"})
+    monkeypatch.setenv("SLACK_PEER_BOT_USERS", "U0C2G1517EC\n\tU0BN5FSURBN,")
+    assert config._peer_bot_users() == frozenset({"U0C2G1517EC", "U0BN5FSURBN"})
+
+
+def test_peer_list_still_rejects_non_ids(monkeypatch):
+    monkeypatch.setenv(
+        "SLACK_PEER_BOT_USERS", "B0C15LE90KH, harris, u0lower, W0PEER1"
+    )
+    assert config._peer_bot_users() == frozenset({"W0PEER1"})
+
+
+def test_int_typo_warns_and_falls_back(monkeypatch, capsys):
+    monkeypatch.setenv("SLACK_PEER_MAX_TURNS", "four")
+    assert config._int_env("SLACK_PEER_MAX_TURNS", 4, 0, 50) == 4
+    err = capsys.readouterr().err
+    assert "SLACK_PEER_MAX_TURNS" in err and "whole number" in err
+
+
+def test_int_out_of_range_warns_with_the_value_used(monkeypatch, capsys):
+    monkeypatch.setenv("SLACK_PEER_HOURLY_CAP", "5000")
+    assert config._int_env("SLACK_PEER_HOURLY_CAP", 30, 0, 1000) == 1000
+    err = capsys.readouterr().err
+    assert "5000" in err and "1000" in err
+
+
+def test_int_surrounding_space_is_accepted(monkeypatch, capsys):
+    monkeypatch.setenv("SLACK_PEER_MAX_TURNS", " 6 ")
+    assert config._int_env("SLACK_PEER_MAX_TURNS", 4, 0, 50) == 6
+    assert capsys.readouterr().err == ""
+
+
+def test_join_backfill_typo_warns(monkeypatch, capsys):
+    monkeypatch.setenv("SLACK_THREAD_JOIN_BACKFILL", "nope")
+    assert config._join_backfill_limit() == 20
+    err = capsys.readouterr().err
+    assert "SLACK_THREAD_JOIN_BACKFILL" in err
+
+
+def test_peer_list_all_junk_warns_instead_of_going_quiet(monkeypatch, capsys):
+    """Every bot post is dropped when this parses empty. That must be loud."""
+    monkeypatch.setenv("SLACK_PEER_BOT_USERS", "u0lower, harris")
+    assert config._peer_bot_users() == frozenset()
+    err = capsys.readouterr().err
+    assert "U0LOWER" in err.upper() and "nobody" in err
+
+
+def test_peer_list_partly_junk_names_what_it_dropped(monkeypatch, capsys):
+    monkeypatch.setenv("SLACK_PEER_BOT_USERS", "U0C2G1517EC,harris")
+    assert config._peer_bot_users() == frozenset({"U0C2G1517EC"})
+    assert "harris" in capsys.readouterr().err
+
+
+def test_peer_list_unset_says_nothing(monkeypatch, capsys):
+    monkeypatch.delenv("SLACK_PEER_BOT_USERS", raising=False)
+    assert config._peer_bot_users() == frozenset()
+    assert capsys.readouterr().err == ""
