@@ -73,10 +73,18 @@ slugify() {
 # Usage: frontmatter_field <file> <field>
 frontmatter_field() {
     local file="$1" field="$2"
-    sed -n '/^---$/,/^---$/p' "$file" \
-        | grep "^${field}:" \
-        | head -1 \
-        | sed "s/^${field}:[[:space:]]*//" \
+    # Only the FIRST frontmatter block counts. The old reader took a sed range
+    # from the first --- to any later ---, so a memory whose body contains a
+    # ruler had its body lines read as header fields: a body "until: 1999-01-01"
+    # after a ruler became the memory's until. thinkers/_lib/common.sh (_fm) and
+    # the dashboard's memories.py both scope to the first block; this now does
+    # too, with an explicit open/close flag rather than a line range.
+    awk -v k="${field}:" '
+        NR==1 && /^---$/ { inb=1; next }
+        inb && /^---$/ { exit }
+        inb && index($0, k)==1 { print substr($0, length(k)+1); exit }
+    ' "$file" 2>/dev/null \
+        | sed 's/^[[:space:]]*//' \
         | sed "s/^[\"']\(.*\)[\"']$/\1/" || true
 }
 
