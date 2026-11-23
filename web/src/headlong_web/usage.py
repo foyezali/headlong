@@ -36,8 +36,21 @@ is an explicit POST, so a dash sitting open burns no CPU.
 
 A ``.lock`` directory marks a refresh in progress (same convention as the
 recap cache); the API reports it as ``refreshing``.
+
+A byte offset alone cannot tell "this file grew" from "this file was rewritten
+and happens to be longer", and the second case would resume the read
+mid-row. Each read therefore stores a signature of the file: its device and
+inode, and a hash of the bytes ending at the offset. A rotated, replaced or
+compacted file no longer matches and triggers a full pass.
+
+A refresh that raises leaves the previous cache in place and writes the
+failure to ``last-error.json`` beside it, which the API reports as
+``last_error`` until a refresh succeeds and clears it. Without that the only
+trace was a traceback in the server log, so a dash could stop updating for
+days with nothing on screen to say why.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -45,14 +58,18 @@ import shutil
 import tempfile
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 CACHE_DIRNAME = "usage"
 CACHE_FILE = "cache.json"
 LOCK_DIRNAME = ".lock"
 LEDGER_FILE = "llm.jsonl"
+ERROR_FILE = "last-error.json"
+# Bytes hashed to fingerprint where a file ended; see _sig.
+SIG_BYTES = 512
 # A lock older than this is a crashed refresh, not a running one.
 STALE_LOCK_S = 15 * 60
 
@@ -100,6 +117,68 @@ def ledger_path(identity_dir: Path) -> Path:
     return identity_dir / "usage" / LEDGER_FILE
 
 
+def error_path(traj_dir: Path) -> Path:
+    return cache_dir(traj_dir) / ERROR_FILE
+
+
+def read_error(traj_dir: Path) -> dict | None:
+    """The failure of the most recent refresh, or None if the last one
+    succeeded (or never ran)."""
+    try:
+        err = json.loads(error_path(traj_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return err if isinstance(err, dict) else None
+
+
+def _record_error(traj_dir: Path, message: str) -> None:
+    target = error_path(traj_dir)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".error-",
+                                   suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"at": _now_iso(), "message": message}, fh)
+        os.replace(tmp, target)
+    except OSError:
+        pass
+
+
+def _clear_error(traj_dir: Path) -> None:
+    try:
+        error_path(traj_dir).unlink()
+    except OSError:
+        pass
+
+
+def _sig(path: Path, offset: int) -> dict:
+    """Where a file stood when it was read up to ``offset``: its device and
+    inode, and the hash of the bytes ending at the offset. An appended file
+    keeps all three, so a normal refresh matches; a rotated file (new inode)
+    or one rewritten in place (different bytes before the offset) does not."""
+    sig: dict = {"dev": None, "ino": None, "tail": None}
+    try:
+        st = path.stat()
+    except OSError:
+        return sig
+    sig["dev"], sig["ino"] = st.st_dev, st.st_ino
+    want = min(int(offset or 0), SIG_BYTES)
+    if want > 0:
+        try:
+            with path.open("rb") as fh:
+                fh.seek(int(offset) - want)
+                sig["tail"] = hashlib.sha256(fh.read(want)).hexdigest()
+        except OSError:
+            pass
+    return sig
+
+
+def _sig_matches(prev, cur: dict) -> bool:
+    if not isinstance(prev, dict):
+        return False
+    return all(prev.get(k) == cur.get(k) for k in ("dev", "ino", "tail"))
+
+
 def is_refreshing(traj_dir: Path) -> bool:
     lock = lock_path(traj_dir)
     if not lock.is_dir():
@@ -132,6 +211,8 @@ def _empty_state(identity_name: str) -> dict:
         "generated": None,
         "log_offset": 0,
         "ledger_offset": 0,
+        "log_sig": None,
+        "ledger_sig": None,
         "rows": 0,
         "skipped": 0,
         "ledger_rows": 0,
@@ -288,24 +369,38 @@ def refresh(traj_dir: Path, identity_name: str, ledger: Path | None = None,
             rebuild: bool = False) -> dict:
     """Bring the cache up to date with the log (and ledger, when given) and
     return the new state. Reads only what was appended since the cached
-    offsets; a file that shrank (rewritten, rotated) or a cache from another
-    version triggers a full pass. The caller is responsible for the lock."""
+    offsets; a file that does not match its recorded signature (shrunk,
+    rotated, replaced, or rewritten in place) or a cache from another version
+    triggers a full pass. The caller is responsible for the lock.
+
+    Known limit: a file rewritten in place, to the same inode, whose new last
+    SIG_BYTES before the old offset happen to be byte identical, still reads as
+    an append. Catching that needs a whole-file hash, which would cost a full
+    read on every refresh and defeat the incremental design."""
     log = traj_dir / "trajectory.jsonl"
     state = None if rebuild else load(traj_dir)
     if state is None or state.get("identity") != identity_name:
         state = _empty_state(identity_name)
-    if (_size(log) < int(state.get("log_offset") or 0)
-            or _size(ledger) < int(state.get("ledger_offset") or 0)):
+    log_sig = _sig(log, int(state.get("log_offset") or 0))
+    ledger_sig = (_sig(ledger, int(state.get("ledger_offset") or 0))
+                  if ledger is not None else None)
+    moved = not _sig_matches(state.get("log_sig"), log_sig)
+    if ledger is not None:
+        moved = moved or not _sig_matches(state.get("ledger_sig"), ledger_sig)
+    if moved:
         state = _empty_state(identity_name)
     state["log_offset"] = _read_appended(
         log, int(state.get("log_offset") or 0),
         lambda line: _ingest_log(state, line, identity_name))
+    state["log_sig"] = _sig(log, int(state["log_offset"]))
     if ledger is not None:
         state["ledger_offset"] = _read_appended(
             ledger, int(state.get("ledger_offset") or 0),
             lambda line: _ingest_ledger(state, line))
+        state["ledger_sig"] = _sig(ledger, int(state["ledger_offset"]))
     state["generated"] = _now_iso()
     _write(traj_dir, state)
+    _clear_error(traj_dir)
     return state
 
 
@@ -327,6 +422,11 @@ def start_refresh(traj_dir: Path, identity_name: str, ledger: Path | None = None
     def _run() -> None:
         try:
             refresh(traj_dir, identity_name, ledger=ledger, rebuild=rebuild)
+        except Exception as exc:  # noqa: BLE001 - record it, never kill silently
+            traceback.print_exc()
+            _record_error(traj_dir, f"{type(exc).__name__}: {exc}")
+        else:
+            _clear_error(traj_dir)
         finally:
             shutil.rmtree(lock, ignore_errors=True)
 
@@ -362,6 +462,9 @@ def summary(traj_dir: Path, identity_id: str, identity_name: str,
         "refreshing": is_refreshing(traj_dir),
         "pending_bytes": _pending_bytes(traj_dir, ledger, state),
     }
+    error = read_error(traj_dir)
+    if error:
+        base["last_error"] = error
     if state is None or not state.get("generated"):
         return {**base, "available": False}
     daily = state.get("daily") or {}

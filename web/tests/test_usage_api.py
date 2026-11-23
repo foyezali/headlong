@@ -340,3 +340,143 @@ def test_usage_refresh_read_only(identity: Path, traj_dir: Path):
     resp = ro.post("/api/identities/.identities~usr/usage/refresh", json={})
     assert resp.status_code == 403
     assert ro.get("/api/identities/.identities~usr/usage").status_code == 200
+
+
+# --- module: rewritten files ------------------------------------------------
+
+def test_log_rewritten_longer_is_rebuilt(traj_dir: Path, monkeypatch):
+    """A log that is rewritten and comes out LONGER (compaction, an import, a
+    restored backup) used to resume the read mid-row, drop the fragment and
+    never re-read the events before the old offset. The signature catches it."""
+    usage.refresh(traj_dir, "usr")
+    log = traj_dir / "trajectory.jsonl"
+    usage.refresh(traj_dir, "usr")
+    # Same events, one of them widened, plus one new day: longer than before.
+    rows = [
+        _row(type="trajectory", step_id=ROOT_TRAJ, ts="2026-08-01T09:00:00Z"),
+        _run_rows("2026-08-01", "run1", "modelA", 1000, 50, 10),
+        _row(type="message", step_id="m1", **{"from": "nick", "to": "usr"},
+             content="the same note, rewritten with a much longer body than before",
+             ts="2026-08-01T16:30:00Z"),
+    ]
+    rows += [_row(type="message", step_id=f"pad{i}", **{"from": "nick", "to": "usr"},
+                  content="filler " * 20, ts="2026-08-01T18:00:00Z") for i in range(6)]
+    rows.append(_row(type="message", step_id="m2", **{"from": "usr", "to": "nick"},
+                     content="hi", ts="2026-08-02T17:00:00Z"))
+    log.write_text("".join(rows))
+    assert log.stat().st_size > usage.load(traj_dir)["log_offset"]
+    calls = []
+    real_ingest = usage._ingest_log
+    monkeypatch.setattr(usage, "_ingest_log",
+                        lambda st, line, name: (calls.append(line), real_ingest(st, line, name)))
+    state = usage.refresh(traj_dir, "usr")
+    assert len(calls) == 13, "a rewritten log must be read whole"
+    assert state["skipped"] == 0
+    assert _day(state, "2026-08-01")["in_msg"] == 7   # the note plus six fillers
+    assert _day(state, "2026-08-02")["out_msg"] == 1
+
+
+def test_ledger_rewritten_longer_is_rebuilt(traj_dir: Path, ledger: Path):
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(_ledger_row("2026-08-04", "m", 10, 1))
+    usage.refresh(traj_dir, "usr", ledger=ledger)
+    # The first row must change LENGTH for the old offset to land mid-row,
+    # otherwise this test passes for the wrong reason.
+    ledger.write_text(_ledger_row("2026-08-04", "a-much-longer-model-name", 10, 1)
+                      + _ledger_row("2026-08-04", "m", 20, 2, hhmm="11:00"))
+    state = usage.refresh(traj_dir, "usr", ledger=ledger)
+    assert _day(state, "2026-08-04")["llm"]["calls"] == 2
+    assert _day(state, "2026-08-04")["llm"]["in"] == 30
+    # The tell: a resumed read lands mid-row and the fragment is skipped.
+    assert state["ledger_skipped"] == 0
+
+
+def test_replaced_file_with_identical_bytes_is_rebuilt(traj_dir: Path):
+    """Rotation keeps the bytes and changes the inode; the old offset would
+    have been trusted and nothing would ever be recounted."""
+    usage.refresh(traj_dir, "usr")
+    log = traj_dir / "trajectory.jsonl"
+    keep = traj_dir / "rotate.tmp"
+    keep.write_bytes(log.read_bytes())
+    keep.replace(log)          # same bytes, new inode
+    calls = []
+    real_ingest = usage._ingest_log
+    import types
+    orig = usage._ingest_log
+    usage._ingest_log = lambda st, line, name: (calls.append(line), orig(st, line, name))
+    try:
+        state = usage.refresh(traj_dir, "usr")
+    finally:
+        usage._ingest_log = orig
+    assert len(calls) == 14
+    assert state["rows"] == 14
+
+
+def test_failed_refresh_is_reported_then_cleared(traj_dir: Path):
+    real_ingest = usage._ingest_log
+
+    def boom(state, line, name):
+        raise RuntimeError("simulated bug")
+
+    usage._ingest_log = boom
+    try:
+        assert usage.start_refresh(traj_dir, "usr") is True
+        for _ in range(100):
+            if not usage.is_refreshing(traj_dir):
+                break
+            time.sleep(0.02)
+    finally:
+        usage._ingest_log = real_ingest
+    body = usage.summary(traj_dir, "id", "usr")
+    assert body["available"] is False
+    assert "simulated bug" in body["last_error"]["message"]
+    # The next good refresh clears it.
+    usage.refresh(traj_dir, "usr")
+    assert "last_error" not in usage.summary(traj_dir, "id", "usr")
+
+
+def test_failed_refresh_keeps_the_previous_cache(traj_dir: Path):
+    usage.refresh(traj_dir, "usr")
+    before = usage.load(traj_dir)
+    real_ingest = usage._ingest_log
+    usage._ingest_log = lambda *a: (_ for _ in ()).throw(RuntimeError("nope"))
+    try:
+        usage.start_refresh(traj_dir, "usr")
+        for _ in range(100):
+            if not usage.is_refreshing(traj_dir):
+                break
+            time.sleep(0.02)
+    finally:
+        usage._ingest_log = real_ingest
+    assert usage.load(traj_dir) == before
+    assert usage.summary(traj_dir, "id", "usr")["rows"] == 14
+
+
+def test_failed_refresh_is_visible_through_the_api(client: TestClient, traj_dir: Path):
+    """The point of last-error.json: someone watching the dash sees why it
+    stopped moving, not just a spinner that finished."""
+    real_ingest = usage._ingest_log
+    usage._ingest_log = lambda *a: (_ for _ in ()).throw(RuntimeError("disk on fire"))
+    try:
+        assert client.post("/api/identities/.identities~usr/usage/refresh",
+                           json={}).status_code == 202
+        for _ in range(100):
+            if not usage.is_refreshing(traj_dir):
+                break
+            time.sleep(0.02)
+    finally:
+        usage._ingest_log = real_ingest
+    body = client.get("/api/identities/.identities~usr/usage").json()
+    assert body["available"] is False
+    assert "disk on fire" in body["last_error"]["message"]
+    assert body["last_error"]["at"]
+    # A good refresh clears it.
+    assert client.post("/api/identities/.identities~usr/usage/refresh",
+                       json={"rebuild": True}).status_code == 202
+    for _ in range(100):
+        if not usage.is_refreshing(traj_dir):
+            break
+        time.sleep(0.02)
+    body = client.get("/api/identities/.identities~usr/usage").json()
+    assert body["available"] is True
+    assert "last_error" not in body
