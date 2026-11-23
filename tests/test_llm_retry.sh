@@ -144,6 +144,14 @@ EOF
 chmod +x "$WORK/bin/curl"
 export PATH="$WORK/bin:$PATH"
 export OPENROUTER_API_KEY="test-key"
+# This suite must not inherit a live identity: bin/llm writes its usage ledger to
+# $IDENTITY_DIR/usage/llm.jsonl when IDENTITY_DIR is set, so running it from a
+# shell that exports IDENTITY_DIR (a live identity) appended fixture rows to the
+# real spend ledger and failed every ledger check. Same guard as
+# test_llm_usage_positions.sh.
+unset IDENTITY_DIR IDENTITY_NAME LLM_USAGE_FILE LLM_USAGE_LEDGER \
+      LLM_RUN_ID SHELLM_RUN_STEP_ID LLM_PROVIDER LLM_MODEL SHELLM_MODEL
+
 export HEADLONG_HOME="$WORK/home"   # bin/llm writes run/llm_health.json here
 mkdir -p "$HEADLONG_HOME"
 export CURL_COUNT="$WORK/count" CURL_MODE_FILE="$WORK/modes"
