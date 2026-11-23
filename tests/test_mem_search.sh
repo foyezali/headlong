@@ -214,5 +214,36 @@ f=$(ls "$MEM_DIR"/*.md | head -1)
 grep -q '^until: 2026-09-30$' "$f" && ok "mem edit keeps the until: expiry" || bad "mem edit keeps until" "$(sed -n '1,8p' "$f")"
 grep -q 'second candidate' "$f" && ok "mem edit replaced the body" || bad "mem edit body"
 
+# --- 8. an empty answer is a failure, not a quiet "no hits" ----------------
+# bin/llm sends a reasoning model's chain of thought to stderr and can finish
+# with exit 0 and no content at all (a small output cap is spent thinking).
+# mem used to pass that through as a silent empty success, and callers cannot
+# tell it from a search that legitimately matched nothing.
+cat > "$WORK/bin/llm" <<'EOS'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'We need to find memories matching the query. Let me think.\n' >&2
+exit 0
+EOS
+chmod +x "$WORK/bin/llm"
+out=$(mem search "Noah" 2>"$WORK/empty-err"); rc=$?
+if [[ "$rc" -ne 0 && -z "$out" ]]; then ok "an empty answer exits nonzero with no stdout"; else bad "empty answer fails loudly" "rc=$rc out=[$out]"; fi
+grep -q 'returned no answer text' "$WORK/empty-err" && ok "an empty answer says why on stderr" || bad "empty-answer reason" "$(cat "$WORK/empty-err")"
+grep -q 'MEM_SEARCH_MAX_TOKENS' "$WORK/empty-err" && ok "an empty answer names the knob that causes it" || bad "empty-answer knob hint"
+cat > "$WORK/bin/llm" <<'EOS'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'a.md Noah intro\nb.md Noah reply\n'
+EOS
+chmod +x "$WORK/bin/llm"
+out=$(mem search "Noah" 2>/dev/null)
+[[ "$out" == *"a.md Noah intro"* && "$out" == *"b.md Noah reply"* ]] && ok "a real answer still comes through whole" || bad "real answer passthrough" "$out"
+cat > "$WORK/bin/llm" <<'EOS'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "stub reply"
+EOS
+chmod +x "$WORK/bin/llm"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

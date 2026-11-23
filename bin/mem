@@ -571,11 +571,28 @@ $(cat "$f")
     # This also applies with the search deadline disabled: public TERM/INT
     # must still cancel the whole tree. llm retains its own shorter bound.
     # shellcheck disable=SC2086
-    printf 'Search these memories for: %s\n\n%s' "$query" "$memories" | \
+    # Capture the answer before printing it. A reasoning model puts its chain
+    # of thought on stderr (bin/llm surfaces reasoning_content there) and can
+    # spend the whole output cap thinking, finishing with exit 0 and no
+    # content at all. Piping that straight to the caller made `mem search`
+    # look like a successful query that returned nothing: exit 0, empty
+    # stdout, and the only sign the model had rambled was its reasoning on
+    # stderr, which the caller does not read. Live twice, 2026-11-23, once on
+    # my own store with the whole note shown on stderr.
+    local answer=""
+    answer=$(printf 'Search these memories for: %s\n\n%s' "$query" "$memories" | \
         _LLM_SHARED_PROCESS_GROUP=1 llm ${SHELLM_FAST_MODEL:+-m "$SHELLM_FAST_MODEL"} -t "${MEM_SEARCH_MAX_TOKENS:-16000}" \
-            -s "You are a semantic search engine for memory files. Each memory has a filename header (=== filename ===), YAML frontmatter (summary, type), and a body. Return ONLY the filenames and summaries of semantically matching memories, one per line. If nothing matches, say 'No matches found.'" || rc=$?
+            -s "You are a semantic search engine for memory files. Each memory has a filename header (=== filename ===), YAML frontmatter (summary, type), and a body. Return ONLY the filenames and summaries of semantically matching memories, one per line. If nothing matches, say 'No matches found.'") || rc=$?
     # The EXIT trap owns heartbeat cleanup; a second wait here would print
     # "not a child" once the trap has already reaped it.
+    # Blank or whitespace-only output is a failure even at exit 0: an empty
+    # answer is indistinguishable from a query with no hits, and silence is
+    # how the reasoning-only stream went unnoticed. Say why and fail.
+    if [[ -z "${answer//[[:space:]]/}" && "$rc" -eq 0 ]]; then
+        printf 'mem search: the model returned no answer text (exit 0, empty stdout). If the call spent its budget thinking, raise MEM_SEARCH_MAX_TOKENS (currently %s); if it truly matched nothing, the answer should say so.\n' "${MEM_SEARCH_MAX_TOKENS:-16000}" >&2
+        return 1
+    fi
+    [[ -n "${answer//[[:space:]]/}" ]] && printf '%s\n' "$answer"
     return "$rc"
 )
 
@@ -919,7 +936,10 @@ Environment:
   MEM_DIR   Override memory directory (default: ./.memories)
   MEM_SEARCH_TOP         Candidates the keyword prefilter sends the model (40)
   MEM_SEARCH_MAX_TOKENS  Output cap for the search call (16000; a reasoning
-                         model thinks against it, so keep it roomy)
+                         model thinks against it, so keep it roomy). Too small
+                         a cap can be spent entirely on thinking, which now
+                         exits 1 with an explanation instead of printing
+                         nothing.
   MEM_SEARCH_HEARTBEAT_S Seconds between "waiting" lines on stderr while the
                          model works (10; 0 disables)
   MEM_SEARCH_TIMEOUT_S    Total seconds stage 2 may run before giving up (300;
