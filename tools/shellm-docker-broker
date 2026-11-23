@@ -413,8 +413,26 @@ handle_build() {
         "$abs_context"
 }
 
+# These read-only handlers used to take whatever flags the sandbox sent and
+# hand them to docker unchanged, and handle_ps never read its request at all, so
+# `ps -a` came back as a list of running containers with no error and no hint
+# that the flag was dropped. Silence about a dropped flag is the failure shape
+# this program keeps having, so each one now rejects what it does not accept.
+format_arg_ok() {
+    case "$#" in
+        0) return 0 ;;
+        1) [[ "$1" == --format=* ]] ;;
+        2) [[ "$1" == "-f" || "$1" == "--format" ]] ;;
+        *) return 1 ;;
+    esac
+}
+
 handle_ps() {
+    local request="$1"
     local env_name="$SHELLM_BROKER_ENV"
+    local -a args=()
+    _read_request_args
+    [[ "${#args[@]}" -eq 0 ]] || { json_error 64 "ps takes no arguments"; return; }
     log_msg "ps"
     run_capture docker ps --filter "label=shellm.broker.env=$env_name"
 }
@@ -449,12 +467,9 @@ handle_info() {
     local request="$1"
     local -a args=()
     _read_request_args
-    log_msg "info"
-    local -a cmd=(docker info)
-    if [[ "${#args[@]}" -gt 0 ]]; then
-        cmd+=("${args[@]}")
-    fi
-    run_capture "${cmd[@]}"
+    format_arg_ok "${args[@]}" || { json_error 64 "info accepts only --format TEMPLATE"; return; }
+    log_msg "info argc=${#args[@]}"
+    run_capture docker info "${args[@]}"
 }
 
 handle_version() {
@@ -462,15 +477,22 @@ handle_version() {
     local -a args=()
     _read_request_args
     log_msg "version argc=${#args[@]}"
-    if [[ "${#args[@]}" -eq 1 && ( "${args[0]}" == "-v" || "${args[0]}" == "--version" ) ]]; then
-        run_capture docker "${args[0]}"
-        return
-    fi
-    local -a cmd=(docker version)
-    if [[ "${#args[@]}" -gt 0 ]]; then
-        cmd+=("${args[@]}")
-    fi
-    run_capture "${cmd[@]}"
+    case "${#args[@]}" in
+        0) run_capture docker version ;;
+        1)
+            case "${args[0]}" in
+                -v|--version) run_capture docker --version ;;
+                *) json_error 64 "version accepts -v, --version, or --format TEMPLATE" ;;
+            esac
+            ;;
+        2)
+            case "${args[0]}" in
+                -f|--format) run_capture docker version --format "${args[1]}" ;;
+                *) json_error 64 "version accepts -v, --version, or --format TEMPLATE" ;;
+            esac
+            ;;
+        *) json_error 64 "version accepts -v, --version, or --format TEMPLATE" ;;
+    esac
 }
 
 # The host paths a compose model names, emitted as NUL-terminated
@@ -1002,7 +1024,7 @@ process_request() {
     case "$op" in
         run) handle_run "$request" ;;
         build) handle_build "$request" ;;
-        ps) handle_ps ;;
+        ps) handle_ps "$request" ;;
         logs) handle_logs "$request" ;;
         rm) handle_rm "$request" ;;
         info) handle_info "$request" ;;
