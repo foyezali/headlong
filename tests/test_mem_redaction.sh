@@ -24,6 +24,22 @@ bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; }
 sed '$d' "$REPO/bin/mem" > "$WORK/mem-library"
 mem() ( source "$WORK/mem-library"; main "$@"; )
 body() { sed '1d' "$1" | sed '1,/^---$/d' | sed '1d'; }
+# bin/mem writes ambiguous frontmatter scalars single-quoted (9d258fd), so the
+# summary must be read as a YAML value rather than as the raw line. Doubling is
+# the only escape in a single-quoted scalar.
+read_summary() {
+    awk 'NR==1 && /^---$/ { inb=1; next }
+         inb && /^---$/ { exit }
+         inb && /^summary: / { print substr($0, 10); exit }' "$1"
+}
+unquote_scalar() {
+    local v="$1"
+    if [[ "$v" == \'*\' && ${#v} -ge 2 ]]; then
+        v="${v:1:${#v}-2}"
+        v="${v//\'\'/\'}"
+    fi
+    printf '%s' "$v"
+}
 repeat() { local i; for ((i=0; i<$2; i++)); do printf '%s' "$1"; done; }
 
 # Test every case through both write paths and both input methods. Check the
@@ -52,7 +68,8 @@ check_text() {
             actual=$(body "$file")
             # All these cases start with a nonblank line, valid on both heads.
             summary=$(printf '%s' "$expected" | sed -n '1p' | cut -c1-80)
-            if [[ "$actual" == "$expected" ]] && grep -Fx "summary: $summary" "$file" >/dev/null; then
+            if [[ "$actual" == "$expected" ]] &&
+               [[ "$(unquote_scalar "$(read_summary "$file")")" == "$summary" ]]; then
                 ok "$label $action/$mode body and summary"
             else
                 bad "$label $action/$mode body and summary"
