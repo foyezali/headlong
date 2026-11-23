@@ -6,9 +6,14 @@ query is a linear scan over the fields that carry text. Huge fields
 (stdout, run commands embedding whole prompts) are scanned only in
 their first _FIELD_CAP chars so one giant step can't blow up a query.
 
-scope="thoughts" skips run-machinery step types (prompts, model
-reasoning, shell output) — the mind-level log Braden means by "thought
-log". scope="all" searches everything.
+scope="thoughts" skips run machinery (prompts, model reasoning, shell
+output) — the mind-level log Braden means by "thought log". The split is
+not the type name but who wrote the step: a machinery-typed step that
+carries a `source` was written by the mind itself (`final` with
+source=monolith is a durable conclusion, not a run's exit), so it stays.
+The normalizer draws the line the same way, with
+`source is None and step_type in MACHINERY_TYPES`, when it decides what
+belongs to a run group. scope="all" searches everything.
 """
 
 from typing import Any
@@ -71,7 +76,13 @@ def search_steps(
     for index in range(len(steps) - 1, -1, -1):  # newest first
         step = steps[index]
         step_type = str(step.get("type") or "")
-        if scope != "all" and step_type in MACHINERY_TYPES:
+        # Machinery only when nobody claimed the step: see the module
+        # docstring. `source` is set on every mind-written step.
+        if (
+            scope != "all"
+            and step_type in MACHINERY_TYPES
+            and step.get("source") is None
+        ):
             continue
         raw = step.get("raw") or {}
         matched_field: str | None = None

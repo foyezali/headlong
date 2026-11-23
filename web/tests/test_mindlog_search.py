@@ -93,3 +93,40 @@ def test_search_read_only_mode(search_root: Path):
     """Search is a GET — must work for the read-only dash audience."""
     client = TestClient(create_app(search_root, read_only=True))
     assert client.get(f"{URL}?q=quantum").json()["total"] == 2
+
+
+def test_thoughts_scope_keeps_mind_written_final(tmp_path: Path):
+    """A `final` carrying a source is the mind's conclusion, not machinery.
+
+    bin/shellm writes {type:"final", content, run_id} with no source; the
+    thinkers write {type:"final", content, source:"monolith"}. The second
+    kind is a durable conclusion and must stay in the mind-level scope.
+    """
+    identity = tmp_path / ".identities" / "srch2"
+    identity.mkdir(parents=True)
+    (identity / "info.txt").write_text(
+        f"name=srch2\ncreated=x\nroot_trajectory={ROOT_TRAJ}\n"
+    )
+    d = identity / "trajectories" / "cdcdcdcd-root"
+    d.mkdir(parents=True)
+    steps = [
+        {"type": "trajectory", "step_id": ROOT_TRAJ, "ts": "t0"},
+        {"type": "final", "step_id": "f-sourced", "source": "monolith",
+         "content": "the quantum biscuit oven is fixed", "ts": "t1"},
+        {"type": "final", "step_id": "f-machinery", "run_id": "run1",
+         "content": "quantum run exited", "ts": "t2"},
+        {"type": "shell-output", "step_id": "o1", "run_id": "run1",
+         "stdout": "quantum log line", "exit": 0, "ts": "t3"},
+    ]
+    (d / "trajectory.jsonl").write_text(
+        "".join(json.dumps(s) + "\n" for s in steps)
+    )
+    client = TestClient(create_app(tmp_path))
+    url = f"/api/identities/.identities~srch2/mindlog/search"
+
+    thoughts = client.get(f"{url}?q=quantum").json()
+    assert [h["step_id"] for h in thoughts["hits"]] == ["f-sourced"]
+    assert thoughts["hits"][0]["type"] == "final"
+
+    everything = client.get(f"{url}?q=quantum&scope=all").json()
+    assert [h["step_id"] for h in everything["hits"]] == ["o1", "f-machinery", "f-sourced"]
