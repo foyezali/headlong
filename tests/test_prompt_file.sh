@@ -41,7 +41,14 @@ export HOME="$WORK/home"
 export HEADLONG_HOME="$WORK/home/.headlong"
 # An inherited TRAJ_DIR (any run inside shellm) outranks HEADLONG_HOME in
 # bin/shellm, so the stub runs would write into the caller's real trajectory.
-unset TRAJ_DIR TRAJ_ID SHELLM_TRAJ_DIR
+# This test launches bin/shellm, which resolves its trajectory dir as
+# SHELLM_TRAJ_DIR -> TRAJ_DIR -> $HEADLONG_HOME/trajectories. Overriding HOME
+# is not enough: an inherited variable outranks the sandbox, so running this
+# from inside a mind writes runs into that mind's live trajectory (and
+# ROOT_TRAJ_ID / _SHELLM_PARENT_TRAJ_ID append fork rows to its root).
+# The config and identity roads are the same shape (tools/identity re-roots to
+# the caller's live .identities when IDENTITY_NAME/IDENTITY_DIR point at one).
+unset TRAJ_DIR TRAJ_ID ROOT_TRAJ_ID _SHELLM_PARENT_TRAJ_ID SHELLM_TRAJ_DIR SHELLM_HOME SHELLM_CONF_DIR IDENTITY_DIR IDENTITY_NAME
 export ANTHROPIC_API_KEY="test-key"
 export SHELLM_MODEL="test-model"
 export SHELLM_ENV=local

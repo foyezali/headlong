@@ -22,7 +22,9 @@ set -uo pipefail
 # IDENTITY_DIR point at an active identity, so `identity new` inside a test would write
 # there instead of the test's own temp app dir. Every test unsets or exports its own
 # values, so the suite itself needs none of these.
-unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR TRAJ_ID TRAJ_DIR ROOT_TRAJ_ID
+unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR \
+      TRAJ_ID TRAJ_DIR ROOT_TRAJ_ID SHELLM_TRAJ_DIR _SHELLM_PARENT_TRAJ_ID \
+      SHELLM_HOME SHELLM_CONF_DIR
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 pattern="${1:-}"

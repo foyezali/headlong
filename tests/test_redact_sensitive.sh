@@ -212,7 +212,14 @@ unset STREAM_MAX_LINES
 # Run the real loop too: a complete streamed block, an unterminated block,
 # then a clean execution verify both call sites and the per-execution reset.
 # Inherited identity paths must not override this test's disposable state home.
-unset TRAJ_DIR TRAJ_ID SHELLM_TRAJ_DIR ROOT_TRAJ_ID IDENTITY_DIR IDENTITY_NAME
+# This test launches bin/shellm, which resolves its trajectory dir as
+# SHELLM_TRAJ_DIR -> TRAJ_DIR -> $HEADLONG_HOME/trajectories. Overriding HOME
+# is not enough: an inherited variable outranks the sandbox, so running this
+# from inside a mind writes runs into that mind's live trajectory (and
+# ROOT_TRAJ_ID / _SHELLM_PARENT_TRAJ_ID append fork rows to its root).
+# The config and identity roads are the same shape (tools/identity re-roots to
+# the caller's live .identities when IDENTITY_NAME/IDENTITY_DIR point at one).
+unset TRAJ_DIR TRAJ_ID ROOT_TRAJ_ID _SHELLM_PARENT_TRAJ_ID SHELLM_TRAJ_DIR SHELLM_HOME SHELLM_CONF_DIR IDENTITY_DIR IDENTITY_NAME
 mkdir -p "$WORK/home" "$WORK/wd"
 printf '%s\n' 'loop before' "$pem_begin" 'PRIVATE_BODY_loop' \
     "$pem_end" 'loop after' > "$WORK/pem-input"

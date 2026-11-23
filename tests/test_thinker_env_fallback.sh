@@ -142,6 +142,10 @@ EOF
     export PATH="$H/bin:$REPO/bin:$REPO/tools:$PATH"
     export IDENTITY_DIR="$H/id" TRAJ_DIR="$H/id/trajectories" TRAJ_ID=t1 MEM_DIR="$H/id/memories"
     export SHELLM_MODEL=test-model SHELLM_THINKER_ENV=local
+    # The one case here that launches a real bin/shellm. TRAJ_DIR is not
+    # enough: SHELLM_TRAJ_DIR outranks it, and ROOT_TRAJ_ID /
+    # _SHELLM_PARENT_TRAJ_ID would append fork rows to the caller's root.
+    unset SHELLM_TRAJ_DIR ROOT_TRAJ_ID _SHELLM_PARENT_TRAJ_ID SHELLM_HOME SHELLM_CONF_DIR
     OPENROUTER_API_KEY=synthetic-provider-key
     cd "$H/wd" || exit 1
     # shellcheck disable=SC1090  # the library under test

@@ -25,6 +25,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"
 SHELLM="$REPO/bin/shellm"
 
+# This test never executes bin/shellm: it only lifts functions out of the
+# file with awk. No run means no trajectory env to scrub here.
+
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s%s\n' "$1" "${2:+ — $2}"; }

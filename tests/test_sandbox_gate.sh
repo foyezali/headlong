@@ -124,7 +124,9 @@ mkdir -p "$WORK/wd" "$WORK/shome"
 
 run_shellm() {  # run_shellm <SHELLM_REQUIRE_DOCKER value>
     ( cd "$WORK/wd" && \
-      env -u SHELLM_ENV DOCKER_STUB_INFO_RC=1 PATH="$WORK/toolbin:$PATH" \
+      env -u SHELLM_ENV -u TRAJ_DIR -u TRAJ_ID -u ROOT_TRAJ_ID \
+          -u _SHELLM_PARENT_TRAJ_ID -u SHELLM_TRAJ_DIR -u SHELLM_HOME -u SHELLM_CONF_DIR \
+          DOCKER_STUB_INFO_RC=1 PATH="$WORK/toolbin:$PATH" \
           HOME="$WORK/shome" ANTHROPIC_API_KEY=test-key SHELLM_MODEL=test-model \
           SHELLM_REQUIRE_DOCKER="$1" \
           "$WORK/toolbin/shellm" --max-iterations 1 "say hi" ) \
