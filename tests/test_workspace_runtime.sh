@@ -22,8 +22,15 @@ mkdir -p "$W/id/thinkers/monolith"; printf 'x\n' > "$W/id/thinkers/monolith/step
 out=$(IDENTITY_DIR="$W/id" run '_runtime_line')
 grep -q 'your thinkers synced 20[0-9][0-9]-' <<<"$out" && ok "sync time from the newest identity thinker file" || bad "sync time" "$out"
 
-# No git checkout behind the shellm on PATH: prints nothing, exits 0.
-mkdir -p "$W/fake/bin"; printf '#!/bin/sh\n' > "$W/fake/bin/shellm"; chmod +x "$W/fake/bin/shellm"
+# No git checkout behind the mind's tools on PATH: prints nothing, exits 0.
+# All three must be stubbed: _runtime_line tries shellm, traj and mem in turn
+# precisely so a shadowed tool does not hide the install, so stubbing only
+# shellm left traj and mem resolving to the real checkout and the line was
+# printed from it. That made this file pass or fail depending on whether the
+# suite was launched from inside the repo (it only ever showed up once
+# test_uninstall stopped hanging and the suite got this far).
+mkdir -p "$W/fake/bin"
+for _t in shellm traj mem; do printf '#!/bin/sh\n' > "$W/fake/bin/$_t"; chmod +x "$W/fake/bin/$_t"; done
 out=$(bash -c "set -euo pipefail; export PATH=\"$W/fake/bin:\$PATH\"; source \"$REPO/thinkers/_lib/common.sh\"; _runtime_line; echo RC=\$?" 2>&1)
 [[ "$out" == "RC=0" ]] && ok "no git checkout: empty line, rc 0" || bad "no git checkout" "$out"
 
