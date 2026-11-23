@@ -252,6 +252,15 @@ def test_no_peers_configured_keeps_old_rule(bridge):
     b.send(_event(user=PEER, text="hi", bot=True), False)
 
 
+def test_peer_dm_is_dropped_even_with_the_guard_off(bridge):
+    """A peer is heard in channels only; the DM branch skips the loop guard."""
+    b = bridge(max_turns=0, hourly_cap=0)
+    event = _event(user=PEER, text="dm me", bot=True, thread_ts=None, mention=False)
+    event["channel_type"] = "im"
+    event["channel"] = "D_CHAN"
+    b.send(event, False)
+
+
 def test_peer_without_mention_in_inactive_thread_dropped(bridge):
     b = bridge()
     b.send(_event(user=PEER, text="just chatting", bot=True, mention=False), False)

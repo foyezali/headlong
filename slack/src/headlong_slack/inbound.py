@@ -290,6 +290,11 @@ class Inbound:
         is_peer = bool(event.get("bot_id")) and bool(user) and user in self.cfg.peer_bot_users
         if (event.get("bot_id") and not is_peer) or event.get("subtype"):
             return
+        # A peer is heard in channels only. Slack does not deliver bot to bot
+        # DMs, but the DM branch below returns before the loop guard, so a
+        # peer event that ever arrived as a DM would skip both bounds.
+        if is_peer and event.get("channel_type") == "im":
+            return
         text = event.get("text") or ""
         if not user or user == self.bot_user_id:
             return

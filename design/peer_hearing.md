@@ -52,6 +52,13 @@ With the defaults and two personas, one thread carries at most four
 messages from each side, so eight bot posts, before a person has to say
 something. That is enough for an exchange and too few for a runaway.
 
+One gap worth knowing: the per thread count is keyed by the thread the
+message lands in, and a top level peer post starts its own thread, so two
+personas replying to each other at top level in one channel never fill a
+per thread count. Only the hourly cap is left holding that shape. Peer DMs
+are refused outright, since Slack does not deliver them and the DM branch
+returns before the guard.
+
 ## What the mind sees
 
 A forwarded peer message looks like any Slack message in the trajectory,
