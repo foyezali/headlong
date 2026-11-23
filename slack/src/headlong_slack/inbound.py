@@ -12,7 +12,7 @@ import logging
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -458,14 +458,10 @@ class Inbound:
             )
             block = self._format_backfill(prior)
             if block:
-                msg = InboundMessage(
-                    msg.from_name,
-                    msg.user,
-                    msg.channel,
-                    msg.thread_ts,
-                    msg.message_ts,
-                    block + "\n\n" + msg.text,
-                    backfill=False,
+                # dataclasses.replace, not a hand-built InboundMessage: naming
+                # fields here dropped is_peer and is_reaction on the floor.
+                msg = replace(
+                    msg, text=block + "\n\n" + msg.text, backfill=False
                 )
         if msg.resolve_parent and msg.thread_ts:
             item_ts = msg.thread_ts
@@ -476,13 +472,11 @@ class Inbound:
             reaction = msg.text[1:-1] if msg.text.startswith(":") and msg.text.endswith(":") else msg.text
             text = reaction_text(reaction, item_ts, thread_ts)
             if thread_ts != item_ts or text != msg.text:
-                msg = InboundMessage(
-                    naming.encode(msg.user, msg.channel, thread_ts),
-                    msg.user,
-                    msg.channel,
-                    thread_ts,
-                    msg.message_ts,
-                    text,
+                msg = replace(
+                    msg,
+                    from_name=naming.encode(msg.user, msg.channel, thread_ts),
+                    thread_ts=thread_ts,
+                    text=text,
                     resolve_parent=False,
                     is_reaction=True,
                 )

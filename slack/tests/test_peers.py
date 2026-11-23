@@ -17,6 +17,7 @@ import pytest
 
 from headlong_slack import config as config_mod
 from headlong_slack.config import Config
+from headlong_slack import inbound
 from headlong_slack.inbound import Inbound
 from headlong_slack.state import ActiveThreads, PeerGuard
 
@@ -142,7 +143,8 @@ def posted(monkeypatch):
     return p
 
 
-def _cfg(tmp_path, *, peers=frozenset({PEER}), max_turns=4, hourly_cap=30):
+def _cfg(tmp_path, *, peers=frozenset({PEER}), max_turns=4, hourly_cap=30,
+         join_backfill=0):
     serve = tmp_path / "serve"
     ident = serve / "audel"
     ident.mkdir(parents=True, exist_ok=True)
@@ -157,7 +159,7 @@ def _cfg(tmp_path, *, peers=frozenset({PEER}), max_turns=4, hourly_cap=30):
         web_url="http://127.0.0.1:9",
         state_dir=state,
         thread_followups=True,
-        thread_join_backfill=0,
+        thread_join_backfill=join_backfill,
         peer_bot_users=frozenset(peers),
         peer_max_turns=max_turns,
         peer_hourly_cap=hourly_cap,
@@ -284,3 +286,66 @@ def test_person_messages_never_guarded(bridge):
     b = bridge(max_turns=0, hourly_cap=0)
     b.send(_event(user=NICK, text="hi audel"), True)
     b.send(_event(user=NICK, text="still here"), True)
+
+
+class _ClientWithPrior(_Client):
+    """A client whose thread already has lines above the mention."""
+
+    def __init__(self, prior):
+        super().__init__()
+        self.prior = prior
+
+    def conversations_replies(self, **_kw):
+        return {"ok": True, "messages": list(self.prior)}
+
+
+def _deliver_one(tmp_path, client, event, *, join_backfill=0, posted=None):
+    cfg = _cfg(tmp_path, join_backfill=join_backfill)
+    threads = ActiveThreads(cfg.state_dir / "threads.json")
+    ib = Inbound(cfg, _App(client), BOT, threads)
+    try:
+        ib._on_event(event, logging.getLogger("test-peers"))
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            time.sleep(0.02)
+            if posted is None or posted.items:
+                break
+    finally:
+        ib.stop()
+        ib._worker.join(timeout=1)
+
+
+def test_peer_first_mention_keeps_persona_header_through_backfill(tmp_path, posted):
+    """The backfill rewrap built a fresh InboundMessage and dropped is_peer.
+
+    A peer's first mention in a thread was then introduced to the mind as a
+    person, which is the naming peer hearing exists to get right.
+    """
+    client = _ClientWithPrior([{"ts": PARENT, "user": NICK, "text": "earlier context"}])
+    _deliver_one(
+        tmp_path,
+        client,
+        _event(user=PEER, text="the bridge went down", bot=True),
+        join_backfill=5,
+        posted=posted,
+    )
+    assert len(posted.items) == 1
+    body = posted.items[0]["content"]
+    assert "thread before this mention" in body
+    assert "earlier context" in body
+    assert "a Headlong persona like you, not a person" in body
+
+
+def test_peer_bridge_error_still_suppressed_after_backfill(tmp_path, posted):
+    """Same dropped is_peer: the peer-error gate ran on a message that no
+    longer knew it was a peer, so two bridges could loop on error text again.
+    """
+    client = _ClientWithPrior([{"ts": PARENT, "user": NICK, "text": "earlier context"}])
+    _deliver_one(
+        tmp_path,
+        client,
+        _event(user=PEER, text=inbound.DELIVERY_ERROR_TEXT, bot=True),
+        join_backfill=5,
+        posted=posted,
+    )
+    assert posted.items == [], "a peer's bridge error must not reach the mind"
