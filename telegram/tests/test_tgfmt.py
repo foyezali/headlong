@@ -47,3 +47,22 @@ def test_chunk_splits_at_paragraphs():
     parts = tgfmt.chunk(text)
     assert len(parts) >= 2
     assert "".join(parts).replace("\n", "") == text.replace("\n", "")
+
+
+# Same guard, same hole: --reply-to <id> and --follow-up precede the name.
+import pytest
+
+
+@pytest.mark.parametrize(
+    "leaked, expected",
+    [
+        ("chat reply --follow-up --reply-to tr-1 andy The fix is in.",
+         "The fix is in."),
+        ("chat reply --reply-to tr-1 andy The fix is in.", "The fix is in."),
+        ("chat reply --force andy hello", "hello"),
+        ("chat reply  andy   hello", "hello"),
+        ("chat reply --turbo andy hi", "chat reply --turbo andy hi"),
+    ],
+)
+def test_strip_leaked_command_with_flags(leaked, expected):
+    assert tgfmt.strip_leaked_command(leaked) == expected

@@ -28,13 +28,45 @@ def to_mrkdwn(text: str) -> str:
     return "".join(p if p.startswith("`") else _convert_prose(p) for p in parts)
 
 
-def strip_leaked_command(text: str) -> str:
-    """Drop a leading 'chat reply <name>' the model echoed into its reply.
+_LEAK_PREFIX_RE = re.compile(r"^\s*chat\s+reply\b")
+_LEAK_TEXT_COMMAND_RE = re.compile(r"chat\s+reply\b")
+_LEAK_TOKEN_RE = re.compile(r"\S+")
+_LEAK_FLAGS = frozenset({"--follow-up", "--force"})
+_LEAK_FLAGS_WITH_VALUE = frozenset({"--reply-to"})
 
-    The mind-log side also strips this; keeping a bridge-side guard means a
-    leak never reaches Slack even if an agent-typed reply slips through.
+
+def strip_leaked_command(text: str) -> str:
+    """Drop a leading 'chat reply [flags] <name>' the model echoed into a reply.
+
+    The guard only knew the bare two-token form, but the command an agent is
+    told to use carries flags and a trigger step id before the target name
+    (`chat reply --reply-to <step> <name> <message>`), so an echoed follow-up
+    reached the person reading "--reply-to <step> <name> The fix is in."
+
+    Flags are parsed as flags now, by character position so the body keeps its
+    own line breaks. An unknown option abandons the strip rather than guessing
+    how many words belong to it: a guard that half-eats a line invents text
+    instead of hiding it. A command echoed with no message after it is left
+    alone, because there is nothing to protect a person from.
     """
-    return re.sub(r"^\s*chat reply [A-Za-z0-9._-]+\s*", "", text, count=1)
+    if not _LEAK_PREFIX_RE.match(text):
+        return text
+    spans = [m.span() for m in _LEAK_TOKEN_RE.finditer(text)]
+    tokens = [m.group(0) for m in _LEAK_TOKEN_RE.finditer(text)]
+    if len(tokens) < 2 or tokens[0] != "chat" or tokens[1] != "reply":
+        return text
+    i = 2
+    while i < len(tokens) and tokens[i].startswith("--"):
+        if tokens[i] in _LEAK_FLAGS_WITH_VALUE:
+            i += 2
+        elif tokens[i] in _LEAK_FLAGS:
+            i += 1
+        else:
+            return text
+    i += 1  # the target name
+    if i >= len(tokens):
+        return text
+    return text[spans[i][0]:]
 
 
 def clean_inbound(text: str, bot_user_id: str | None = None) -> str:

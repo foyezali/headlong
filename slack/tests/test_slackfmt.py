@@ -63,3 +63,31 @@ def test_recent_posts_dedupe():
     recent2 = RecentPosts(window=300)
     assert not recent2.is_duplicate("slack-U1-C2-3.4", "hello", now=1000)
     assert not recent2.is_duplicate("slack-U1-C2-3.4", "hello", now=1400)  # outside window
+
+
+# The reply command an agent is told to use carries flags and a trigger step
+# id before the target name. The old guard only knew the two-token form, so an
+# echoed "chat reply --reply-to <id> andy ..." reached the person as
+# "--reply-to <id> andy ...". Unknown flags are left alone rather than
+# half-eaten: the guard should never invent text.
+import pytest
+
+
+@pytest.mark.parametrize(
+    "leaked, expected",
+    [
+        ("chat reply --follow-up --reply-to tr-1 andy The fix is in.",
+         "The fix is in."),
+        ("chat reply --reply-to tr-1 andy The fix is in.", "The fix is in."),
+        ("chat reply --force andy hello", "hello"),
+        ("chat reply  andy   hello", "hello"),
+        ("chat reply --follow-up andy\nBody line", "Body line"),
+        ("  chat reply andy hi", "hi"),
+        # Unknown option: leave the text alone rather than guess at its arity.
+        ("chat reply --turbo andy hi", "chat reply --turbo andy hi"),
+        # No message after the command: nothing to protect.
+        ("chat reply --reply-to tr-1", "chat reply --reply-to tr-1"),
+    ],
+)
+def test_strip_leaked_command_with_flags(leaked, expected):
+    assert strip_leaked_command(leaked) == expected
