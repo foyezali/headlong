@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# headlong-bridge-restart — start, stop, or restart a bridge on a box where
+# nothing supervises it.
+#
+# Usage:
+#   headlong-bridge-restart [telegram|slack] [status|restart|stop|start]
+#
+# On a deployed box a systemd unit owns each bridge (Restart=always), so a
+# code change goes live on the next restart of the unit. This machine runs
+# without systemd and the bridge is started by hand, which means a change
+# can sit there unread: on 2026-11-23 the outbound-send retry landed in the
+# checkout and the running process, which had imported the old module the
+# day before, kept sending without it. This script is the restart, with the
+# checks made for you:
+#
+#   - it stops the uv launcher *and* the python child, and waits for both;
+#   - it starts the new one with a clean environment, so an agent's own
+#     SHELLM_* / TELEGRAM_* (a conf dir, a different token) cannot ride in;
+#     the launcher loads its .env files itself;
+#   - it waits for the process and for the startup line in the log;
+#   - it records the pid of the process that does the work, the python
+#     child, not the uv launcher that wraps it.
+#
+# Exit status: 0 when the bridge ends up running (or stopped, for `stop`),
+# 1 otherwise.
+
+APP="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+# APP goes into pgrep -f patterns unescaped, so a path with regex
+# metacharacters would make those patterns misfire. Refuse it up front,
+# before anything else can fail for a less useful reason.
+case "$APP" in
+    *[!A-Za-z0-9/._-]*)
+        echo "${0##*/}: checkout path contains regex metacharacters; pgrep patterns would misfire" >&2
+        exit 1 ;;
+esac
+
+# Where the state home is. Deliberately NOT SHELLM_HOME: an agent shell
+# exports SHELLM_HOME pointing at its identity's .shellm, and a tool run from
+# that shell would then read and write a different run/ and logs/ from the
+# ones the bridge was started with. Resolve from the checkout instead: a
+# state home is a directory containing app_dir (or app/) next to run/.
+# A state home is the directory whose app_dir names this checkout. Testing
+# only for an app/ subdirectory is too loose: any parent of a checkout has
+# one, so the search would stop one level too shallow.
+_home_ok() {
+    [[ -f "$1/app_dir" ]] || return 1
+    [[ "$(readlink -f "$(cat "$1/app_dir" 2>/dev/null)" 2>/dev/null)" == "$APP" ]]
+}
+HOME_DIR=""
+for _cand in "${HEADLONG_HOME:-}" "$HOME/.headlong" "$(dirname "$APP")"; do
+    [[ -n "$_cand" ]] || continue
+    if _home_ok "$_cand"; then HOME_DIR="$_cand"; break; fi
+done
+if [[ -z "$HOME_DIR" ]]; then
+    echo "${0##*/}: could not find a Headlong state home (set HEADLONG_HOME)" >&2
+    exit 1
+fi
+RUN_DIR="$HOME_DIR/run"
+LOG_DIR="$HOME_DIR/logs"
+
+BRIDGE="${1:-telegram}"
+ACTION="${2:-restart}"
+case "$BRIDGE" in
+    telegram|slack) ;;
+    *) echo "${0##*/}: unknown bridge '$BRIDGE' (telegram or slack)" >&2; exit 1 ;;
+esac
+
+ENTRY="headlong-${BRIDGE}-bridge"
+LAUNCHER="$APP/tools/$ENTRY"
+LOG="$LOG_DIR/${BRIDGE}-bridge.log"
+PIDFILE="$RUN_DIR/${BRIDGE}-bridge.pid"
+VENV_PAT="${APP}/${BRIDGE}/\.venv/bin/.*${ENTRY}"
+LAUNCH_PAT="uv run --project ${APP}/${BRIDGE} ${ENTRY}"
+
+alive() { [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
+
+pids() {
+    { pgrep -f -- "$LAUNCH_PAT" 2>/dev/null || true
+      pgrep -f -- "$VENV_PAT"   2>/dev/null || true
+    } | sort -un
+}
+
+say() { printf '%s\n' "$*"; }
+
+do_status() {
+    local found pid
+    found=$(pids)
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    if [[ -z "$found" ]]; then
+        say "$BRIDGE bridge: not running"
+        [[ -n "$pid" ]] && say "  (stale pidfile: $PIDFILE holds $pid)"
+        [[ -f "$LOG" ]] && say "  log last written $(stat -c %y "$LOG")"
+        return 1
+    fi
+    say "$BRIDGE bridge: running"
+    say "  pidfile: ${pid:-absent}${pid:+$(alive "$pid" && echo ' (alive)' || echo ' (dead)')}"
+    for p in $found; do
+        say "  $p  $(ps -o etime= -p "$p" 2>/dev/null | tr -d ' ')  $(ps -o args= -p "$p" 2>/dev/null | cut -c1-110)"
+    done
+    [[ -f "$LOG" ]] && say "  log last written $(stat -c %y "$LOG")"
+    return 0
+}
+
+do_stop() {
+    local found p left killed=0
+    found=$(pids)
+    if [[ -z "$found" ]]; then
+        say "$BRIDGE bridge: not running, nothing to stop"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    # shellcheck disable=SC2086  # word splitting is the point: a list of pids
+    kill -TERM $found 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        left=""
+        for p in $found; do alive "$p" && left="$left $p"; done
+        [[ -z "$left" ]] && break
+        sleep 0.5
+    done
+    if [[ -n "$left" ]]; then
+        say "$BRIDGE bridge: force-killing$left"
+        # shellcheck disable=SC2086
+        kill -KILL $left 2>/dev/null || true
+        sleep 0.5
+    fi
+    for p in $found; do alive "$p" || killed=$((killed+1)); done
+    rm -f "$PIDFILE"
+    say "$BRIDGE bridge: stopped $killed process(es)"
+    return 0
+}
+
+do_start() {
+    local before=0 child="" i log_tail
+    mkdir -p "$RUN_DIR" "$LOG_DIR"
+    if [[ ! -x "$LAUNCHER" ]]; then
+        echo "${0##*/}: $LAUNCHER is missing or not executable" >&2
+        return 1
+    fi
+    [[ -f "$LOG" ]] && before=$(wc -c < "$LOG")
+
+    # A clean environment (see the header), but PATH still has to find uv,
+    # which commonly lives in ~/.local/bin, and the venv's own python. An
+    # empty PATH here fails before the bridge starts, so build it from the
+    # usual places plus whatever directory this shell found uv in.
+    local clean_path="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
+    if uv_dir=$(command -v uv 2>/dev/null) && [[ -n "$uv_dir" ]]; then
+        clean_path="$(dirname "$uv_dir"):$clean_path"
+    fi
+
+    setsid -f env -i \
+        PATH="$clean_path" \
+        HOME="$HOME" \
+        HEADLONG_HOME="$HOME_DIR" \
+        TERM=dumb \
+        bash -c "exec '$LAUNCHER' '$APP'" </dev/null >>"$LOG" 2>&1
+
+    # First start on a fresh checkout builds the venv (tensor seconds), so
+    # poll generously but say what we are waiting for.
+    for i in $(seq 1 "${BRIDGE_START_TICKS:-120}"); do
+        child=$(pgrep -f -- "$VENV_PAT" 2>/dev/null | head -1) || true
+        [[ -n "$child" ]] && break
+        sleep 0.5
+    done
+    if [[ -z "$child" ]]; then
+        echo "${0##*/}: $BRIDGE bridge did not come up within $(( ${BRIDGE_START_TICKS:-120} / 2 ))s; see $LOG" >&2
+        tail -5 "$LOG" >&2 2>/dev/null || true
+        return 1
+    fi
+    printf '%s\n' "$child" > "$PIDFILE"
+
+    # The process existing is not the same as the bridge working: wait for
+    # its own startup line, which is printed only after config loads and
+    # the trajectory is opened.
+    for i in $(seq 1 "${BRIDGE_LOG_TICKS:-40}"); do
+        log_tail=$(tail -c "+$((before + 1))" "$LOG" 2>/dev/null || true)
+        grep -q 'identity=' <<<"$log_tail" && break
+        sleep 0.5
+    done
+    say "$BRIDGE bridge: started, pid $child"
+    if grep -q 'identity=' <<<"$log_tail"; then
+        grep -F 'identity=' <<<"$log_tail" | tail -1 | sed 's/^/  /'
+    else
+        say "  warning: no startup line in the log yet; check $LOG"
+    fi
+    return 0
+}
+
+case "$ACTION" in
+    status)  do_status ;;
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart)
+        # "restart" on a bridge that is not running is a start: the point is
+        # to end up with the current code running either way.
+        do_status >/dev/null || true
+        do_stop
+        do_start
+        ;;
+    *) echo "${0##*/}: unknown action '$ACTION' (status, start, stop, restart)" >&2; exit 1 ;;
+esac
