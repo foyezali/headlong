@@ -399,13 +399,18 @@ def run(
         text = to_mrkdwn(strip_leaked_command(str(step.get("content") or ""))).strip()
         if not text:
             continue
-        if recent.is_duplicate(to, text):
+        # seen(), not is_duplicate(): is_duplicate records the key as it
+        # checks, so a send that then fails leaves the text looking already
+        # posted and the next identical message is refused as a duplicate of
+        # something that never went out. Record only what actually landed.
+        if recent.seen(to, text):
             log.warning("skipping duplicate post to %s", to)
             _notice(cfg, traj, step, "skipped", reason="duplicate of a post within 5 minutes")
             continue
         threads.touch(conv.channel, conv.thread_ts)
         first_ts: str | None = None
         failure: str | None = None
+        posted = 0
         for part in chunk(text):
             try:
                 resp = client.chat_postMessage(
@@ -418,9 +423,12 @@ def run(
                 failure = _exc_reason(exc)
                 log.exception("chat_postMessage failed for %s", to)
                 break
+            posted += 1
             if first_ts is None:
                 ts = _resp_get(resp, "ts")
                 first_ts = str(ts) if ts else None
+        if posted:
+            recent.record(to, text)
         if conv.thread_ts is None and first_ts:
             # A top-level post starts a thread rooted at its own ts. Register
             # it as active so un-mentioned replies under it are forwarded;

@@ -9,6 +9,15 @@ def test_recent_posts_dedupe_window():
     assert not recent.is_duplicate("telegram-2-2", "hi", now=100)
 
 
+def test_recent_posts_seen_does_not_record():
+    recent = RecentPosts(window=300)
+    assert not recent.seen("telegram-1-1", "hi", now=0)
+    assert not recent.seen("telegram-1-1", "hi", now=10), "seen() must not record"
+    recent.record("telegram-1-1", "hi", now=0)
+    assert recent.seen("telegram-1-1", "hi", now=10)
+    assert not recent.seen("telegram-1-1", "hi", now=400)
+
+
 def test_run_delivers_only_chat_sourced_messages(tmp_path, monkeypatch):
     """Only bin/chat speaks for the identity: message steps without
     source:"chat" (a thinker appending raw message steps to the trajectory)
@@ -472,6 +481,29 @@ def test_other_transports_get_no_notice(tmp_path, monkeypatch, notices):
     bot = Bot()
     _drive(tmp_path, monkeypatch, [_msg("m1", "slack-U1-C1"), _msg("m2", "pwa-andy")], bot)
     assert bot.sent == [] and notices == []
+
+
+def test_failed_send_does_not_poison_the_retry(tmp_path, monkeypatch, notices):
+    """is_duplicate() records as it checks, so a failed send left the text
+    looking delivered and the retry was refused as a duplicate of something
+    that never went out (fixed 2026-11-23, matching the Slack bridge)."""
+    class Flaky(Bot):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def send_message(self, chat, text, html=False):
+            self.calls += 1
+            # The first message fails on both the HTML attempt and its plain
+            # fallback, so nothing at all reaches the chat.
+            if self.calls <= 2:
+                raise ApiError("rate limited")
+            return super().send_message(chat, text, html=html)
+
+    bot = Flaky()
+    _drive(tmp_path, monkeypatch, [_msg("m1", "telegram-1-1", "hello"), _msg("m2", "telegram-1-1", "hello")], bot)
+    assert bot.sent == ["hello"]
+    assert [n["status"] for n in notices] == ["failed", "delivered"]
 
 
 def test_duplicate_is_a_skipped_notice(tmp_path, monkeypatch, notices):

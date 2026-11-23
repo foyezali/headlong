@@ -636,6 +636,27 @@ def test_slack_api_failure_is_a_failed_notice(tmp_path, monkeypatch, notices):
     assert "message_ts" not in notices[0]
 
 
+def test_failed_post_does_not_poison_the_retry(tmp_path, monkeypatch, notices):
+    """is_duplicate() records as it checks, so before the fix a send that
+    failed left the text looking delivered and the identical retry was
+    refused as a duplicate of something that never went out (2026-11-23)."""
+    class Flaky(RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def chat_postMessage(self, channel, thread_ts, text, unfurl_links=False, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("rate_limited")
+            return super().chat_postMessage(channel, thread_ts, text, unfurl_links=unfurl_links, **kw)
+
+    client = Flaky()
+    _drive(tmp_path, monkeypatch, [_msg("m1", "slack-C1", "hello"), _msg("m2", "slack-C1", "hello")], client)
+    assert [p["text"] for p in client.posts] == ["hello"]
+    assert [n["status"] for n in notices] == ["failed", "delivered"]
+
+
 def test_duplicate_within_window_is_a_skipped_notice(tmp_path, monkeypatch, notices):
     client = RecordingClient()
     _drive(tmp_path, monkeypatch, [_msg("m1", "slack-C1", "same"), _msg("m2", "slack-C1", "same")], client)

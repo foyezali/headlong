@@ -50,11 +50,19 @@ class RecentPosts:
 
     def is_duplicate(self, conversation: str, text: str, now: float | None = None) -> bool:
         now = time.time() if now is None else now
-        previous = self._last.get(conversation)
-        if previous and previous[0] == text and now - previous[1] < self._window:
+        if self.seen(conversation, text, now=now):
             return True
-        self._last[conversation] = (text, now)
+        self.record(conversation, text, now=now)
         return False
+
+    def seen(self, conversation: str, text: str, now: float | None = None) -> bool:
+        """True if this payload was already recorded in the window. Does not record."""
+        now = time.time() if now is None else now
+        previous = self._last.get(conversation)
+        return bool(previous and previous[0] == text and now - previous[1] < self._window)
+
+    def record(self, conversation: str, text: str, now: float | None = None) -> None:
+        self._last[conversation] = (text, time.time() if now is None else now)
 
 
 # --- delivery notices -------------------------------------------------------
@@ -214,7 +222,7 @@ def _deliver(
             if payload.get("decode_error") or data is None:
                 reason = f"undecodable file payload ({name})"
                 log.error("undecodable file payload for %s (%s)", to, name)
-            elif recent.is_duplicate(to, file_signature(name, data)):
+            elif recent.seen(to, file_signature(name, data)):
                 log.warning("skipping duplicate file post to %s", to)
                 _notice(cfg, traj, step, "skipped", reason="duplicate of a file sent within 5 minutes", filename=name)
                 continue
@@ -239,6 +247,9 @@ def _deliver(
                     reason = _exc_reason(exc)
                     log.exception("file send failed for %s", to)
             if sent_file:
+                sig = file_signature(name, data) if data is not None else None
+                if sig is not None:
+                    recent.record(to, sig)
                 _notice(cfg, traj, step, "delivered", chat=str(conv.chat), filename=name)
             else:
                 # Cursor already advanced past this step; tell the user
@@ -253,7 +264,11 @@ def _deliver(
         text = strip_leaked_command(str(step.get("content") or "")).strip()
         if not text:
             continue
-        if recent.is_duplicate(to, text):
+        # seen(), not is_duplicate(): is_duplicate records the key as it
+        # checks, so a send that then fails leaves the text looking already
+        # delivered and the next identical message is refused as a duplicate
+        # of something that never went out. Record only what actually landed.
+        if recent.seen(to, text):
             log.warning("skipping duplicate post to %s", to)
             _notice(cfg, traj, step, "skipped", reason="duplicate of a message sent within 5 minutes")
             continue
@@ -277,6 +292,8 @@ def _deliver(
                 failure = _exc_reason(exc)
                 log.exception("sendMessage failed for %s", to)
                 break
+        if sent_parts:
+            recent.record(to, text)
         if failure is None:
             _notice(cfg, traj, step, "delivered", chat=str(conv.chat))
         elif sent_parts:
