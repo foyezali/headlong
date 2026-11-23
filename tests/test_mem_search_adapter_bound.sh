@@ -11,6 +11,21 @@ import sys
 import tempfile
 import time
 
+# Own the signal dispositions this test asserts on. A suite launched from a
+# background job or a non-interactive parent receives SIGINT/SIGQUIT already
+# ignored, and POSIX says an ignored disposition survives exec. Bash refuses to
+# trap a signal that was ignored on entry ("trap ... INT" in bin/mem then never
+# runs), so the cancellation checks hang for their whole timeout instead of
+# failing honestly. Measured 2026-11-23: this file passed from an interactive
+# tmux pane and hung from a detached `setsid -f` launch. Reset to default so the
+# child under test sees a trappable SIGINT, which is the disposition a caller
+# with a terminal would have.
+for _sig in (signal.SIGINT, signal.SIGQUIT):
+    try:
+        signal.signal(_sig, signal.SIG_DFL)
+    except (ValueError, OSError):
+        pass
+
 repo = Path(sys.argv[1])
 
 
