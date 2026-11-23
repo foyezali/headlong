@@ -9,8 +9,11 @@ its vars keep the SHELLM_ prefix on purpose.
 """
 
 import os
+import sys
 
-__all__ = ["getenv"]
+__all__ = ["getenv", "getbool"]
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def getenv(name: str, default: str | None = None) -> str | None:
@@ -24,4 +27,29 @@ def getenv(name: str, default: str | None = None) -> str | None:
     legacy = name.replace("HEADLONG_", "SHELLM_", 1)
     if legacy != name and legacy in os.environ:
         return os.environ[legacy]
+    return default
+
+
+def getbool(name: str, default: bool = False) -> bool:
+    """Read `name` (with the SHELLM_* fallback) as a boolean.
+
+    On means one of 1/true/yes/on in any case; off means 0/false/no/off. An
+    unrecognized value falls back to `default` AND says so on stderr, because
+    the alternative — quietly reading a typo as off — is how an operator ends
+    up with a setting they believe is on and is not. An unset or empty value
+    is a plain default with no complaint.
+    """
+    raw = getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    word = raw.strip().lower()
+    if word in _TRUTHY:
+        return True
+    if word in ("0", "false", "no", "off"):
+        return False
+    print(
+        f"headlong-web: {name}={raw!r} is not a boolean (use 1/0, true/false, "
+        f"yes/no, on/off); treating it as {default}",
+        file=sys.stderr,
+    )
     return default

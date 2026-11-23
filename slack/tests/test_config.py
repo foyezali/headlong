@@ -107,3 +107,42 @@ def test_join_backfill_garbage_falls_back(tmp_path, monkeypatch):
     (tmp_path / ".identities" / "default").symlink_to("ada")
     monkeypatch.setenv("SLACK_THREAD_JOIN_BACKFILL", "nope")
     assert config.load(tmp_path).thread_join_backfill == 20
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on", " on "])
+def test_bool_env_truthy_words(monkeypatch, raw):
+    monkeypatch.setenv("SLACK_THREAD_FOLLOWUPS", raw)
+    assert config._bool_env("SLACK_THREAD_FOLLOWUPS") is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "False", "no", "off", " 0"])
+def test_bool_env_falsy_words(monkeypatch, raw):
+    monkeypatch.setenv("SLACK_THREAD_FOLLOWUPS", raw)
+    assert config._bool_env("SLACK_THREAD_FOLLOWUPS") is False
+
+
+def test_bool_env_unset_and_empty_are_the_default(monkeypatch):
+    monkeypatch.delenv("SLACK_THREAD_FOLLOWUPS", raising=False)
+    assert config._bool_env("SLACK_THREAD_FOLLOWUPS") is False
+    assert config._bool_env("SLACK_THREAD_FOLLOWUPS", default=True) is True
+    monkeypatch.setenv("SLACK_THREAD_FOLLOWUPS", "")
+    assert config._bool_env("SLACK_THREAD_FOLLOWUPS") is False
+
+
+def test_bool_env_typo_warns_and_falls_back(monkeypatch, capsys):
+    monkeypatch.setenv("SLACK_THREAD_FOLLOWUPS", "nope")
+    assert config._bool_env("SLACK_THREAD_FOLLOWUPS") is False
+    err = capsys.readouterr().err
+    assert "SLACK_THREAD_FOLLOWUPS" in err and "not a boolean" in err
+
+
+def test_thread_followups_false_means_off(tmp_path, monkeypatch):
+    """The symptom: the old rule read every non-empty, non-'0' value as ON,
+    so =false, =no and =off all turned follow-ups ON."""
+    _identity(tmp_path, "ada")
+    (tmp_path / ".identities" / "default").symlink_to("ada")
+    monkeypatch.setenv("SLACK_THREAD_FOLLOWUPS", "false")
+    cfg = config.load(tmp_path)
+    assert cfg.thread_followups is False
+    monkeypatch.setenv("SLACK_THREAD_FOLLOWUPS", "1")
+    assert config.load(tmp_path).thread_followups is True

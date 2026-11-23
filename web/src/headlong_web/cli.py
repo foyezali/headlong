@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from headlong_web.env import getenv
+from headlong_web.env import getbool, getenv
 
 PACKAGE_DIR = Path(__file__).parent
 STATIC_DIR = PACKAGE_DIR / "static"
@@ -215,7 +215,7 @@ def main() -> None:
         port = args.port
     else:
         port = _find_available_port(args.host, DEFAULT_PORT_RANGE)
-    read_only = args.read_only or getenv("HEADLONG_WEB_READONLY", "") not in ("", "0")
+    read_only = args.read_only or getbool("HEADLONG_WEB_READONLY")
 
     if args.dev:
         _run_dev(root, args.host, port, read_only)

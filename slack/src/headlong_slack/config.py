@@ -7,6 +7,7 @@ unit loads the box's .env via EnvironmentFile).
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -115,7 +116,7 @@ def load(serve_root: Path) -> Config:
             or "http://127.0.0.1:8080"
         ).rstrip("/"),
         state_dir=state_dir,
-        thread_followups=os.environ.get("SLACK_THREAD_FOLLOWUPS", "") not in ("", "0"),
+        thread_followups=_bool_env("SLACK_THREAD_FOLLOWUPS"),
         thread_join_backfill=_join_backfill_limit(),
         peer_bot_users=_peer_bot_users(),
         peer_max_turns=_int_env("SLACK_PEER_MAX_TURNS", 4, 0, 50),
@@ -136,6 +137,37 @@ def _peer_bot_users() -> frozenset[str]:
         if part and part[0] in "UW" and part.isalnum() and part == part.upper():
             ids.add(part)
     return frozenset(ids)
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    """Read `name` as a boolean: 1/true/yes/on means on, 0/false/no/off off.
+
+    The old rule was `value not in ("", "0")`, which reads every value that is
+    not empty or a bare zero as ON. So `SLACK_THREAD_FOLLOWUPS=false` enabled
+    follow-ups, and `=no`, `=off`, `= 0` and any typo did too. The bridge's
+    docs only ever said to set `=1`, so nobody looked.
+
+    An unrecognized value now falls back to `default` and says so on stderr,
+    because quietly reading a typo as off is how an operator ends up with a
+    setting they believe is on and is not. Unset or empty is a plain default.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    word = raw.strip().lower()
+    if word in _TRUTHY:
+        return True
+    if word in ("0", "false", "no", "off"):
+        return False
+    print(
+        f"headlong-slack-bridge: {name}={raw!r} is not a boolean (use 1/0, "
+        f"true/false, yes/no, on/off); treating it as {default}",
+        file=sys.stderr,
+    )
+    return default
 
 
 def _int_env(name: str, default: int, lo: int, hi: int) -> int:

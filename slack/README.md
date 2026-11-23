@@ -57,7 +57,9 @@ runs its own Slack-connected agent on.
 Other settings: `HEADLONG_SLACK_STATE_DIR`, legacy `SHELLM_SLACK_STATE_DIR`
 (cursor + thread state, default
 `<identity>/run/slack-bridge/`), `SLACK_THREAD_FOLLOWUPS=1` (answer
-un-mentioned replies in threads the bot is already part of),
+un-mentioned replies in threads the bot is already part of; boolean
+settings take 1/true/yes/on or 0/false/no/off, and anything else is
+reported on stderr and treated as off),
 `SLACK_THREAD_JOIN_BACKFILL` (how many closest prior messages above a first @mention
 to prepend; default 20, 0 disables, max 50), and peer hearing:
 `SLACK_PEER_BOT_USERS` (comma-separated bot user ids of other Headlong

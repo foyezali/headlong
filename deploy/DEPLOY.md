@@ -104,7 +104,7 @@ terraform deploy writes this drop-in automatically.)
 | Restart web server (agents keep running — the unit's `KillMode=process` signals only the server; stopping the service doesn't stop agents either) | `sudo systemctl restart headlong-web` |
 | Stop every agent process | `sudo -u shellm /opt/shellm/app/tools/headlong-killall` |
 | Update to latest code | see below; or click the navbar build stamp → "Pull latest & restart" (needs `HEADLONG_WEB_SELF_UPDATE=1` in the unit, which the shipped unit sets) |
-| View-only mode | add `Environment="HEADLONG_WEB_READONLY=1"` to the override.conf drop-in (see §4) |
+| View-only mode | add `Environment="HEADLONG_WEB_READONLY=1"` to the override.conf drop-in (see §4). Boolean knobs take `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; anything else is logged at startup and treated as off |
 
 **Updating:**
 

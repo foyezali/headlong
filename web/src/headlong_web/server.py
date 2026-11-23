@@ -218,7 +218,7 @@ def create_app(
     # the demo deployment (systemd restarts it); off by default elsewhere —
     # without a supervisor the process would just exit.
     self_update_enabled = (
-        env.getenv("HEADLONG_WEB_SELF_UPDATE") == "1" and not read_only
+        env.getbool("HEADLONG_WEB_SELF_UPDATE") and not read_only
     )
     update_lock = threading.Lock()
 
