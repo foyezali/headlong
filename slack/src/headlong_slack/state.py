@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
 
 ACTIVE_THREAD_TTL = 7 * 24 * 3600
+
+log = logging.getLogger(__name__)
 
 
 class Deduper:
@@ -45,14 +48,35 @@ class ActiveThreads:
     def __init__(self, path: Path):
         self._path = path
         self._lock = threading.Lock()
-        self._threads: dict[str, float] = {}
-        if path.is_file():
+        self._threads: dict[str, float] = self._load(path)
+
+    @staticmethod
+    def _load(path: Path) -> dict[str, float]:
+        """Read the thread map, keeping every entry that makes sense.
+
+        The first version parsed the whole file in one comprehension, so a
+        single value that was not a number raised, the except swallowed it,
+        and EVERY thread was dropped: after a restart, no thread was active
+        any more and un-mentioned follow-ups silently stopped reaching the
+        mind. A bad entry now costs only itself, and nothing is lost quietly.
+        """
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            log.warning("active threads: cannot read %s (%s); starting empty", path, exc)
+            return {}
+        if not isinstance(data, dict):
+            log.warning("active threads: %s is not a JSON object; starting empty", path)
+            return {}
+        kept: dict[str, float] = {}
+        for key, value in data.items():
             try:
-                data = json.loads(path.read_text())
-                if isinstance(data, dict):
-                    self._threads = {str(k): float(v) for k, v in data.items()}
-            except (ValueError, TypeError):
-                pass
+                kept[str(key)] = float(value)
+            except (TypeError, ValueError):
+                log.warning("active threads: dropping bad entry %r=%r", key, value)
+        return kept
 
     @staticmethod
     def _key(channel: str, thread_ts: str) -> str:
