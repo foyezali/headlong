@@ -459,11 +459,25 @@ else
     fi
     _pin_rows=""
     if [[ ${#CTX_PINS[@]} -gt 0 ]]; then
-        # Cheap byte scan per pin; jq keeps only rows whose step_id actually
-        # matches, so content that merely mentions the ID is harmless.
+        # A pin is an exact step_id, so match it as a step_id KEY, not as any
+        # substring. Reminder and reaction rows carry the id they point at
+        # (trigger_step, reply_to), so a bare-string scan spends the 50-line
+        # cap on mentions and never loads the step's own row: the pin then
+        # silently does not render, which is the one thing a pin exists to
+        # prevent. Both JSON spacings jq emits are matched; a key that merely
+        # ends in step_id cannot match because the quote must sit right before
+        # the s. jq still checks the parsed field, so this only prefilters.
         for _pin in "${CTX_PINS[@]}"; do
-            _pin_match=$(grep -nF -- "$_pin" "$RESOLVED_TRAJ_FILE" | head -50) || continue
-            [[ -z "$_pin_match" ]] && continue
+            # pipefail makes a no-match grep fail the whole pipeline, so the
+            # || true is what keeps the not-found case reaching the warning
+            # below instead of being skipped by a bare || continue.
+            _pin_match=$(grep -nF -e "\"step_id\":\"$_pin\"" -e "\"step_id\": \"$_pin\"" \
+                "$RESOLVED_TRAJ_FILE" | head -50 || true)
+            if [[ -z "$_pin_match" ]]; then
+                printf 'context: warning: pinned step %s not found in %s\n' \
+                    "$_pin" "$RESOLVED_TRAJ_FILE" >&2
+                continue
+            fi
             _pin_rows+=$(printf '%s\n' "$_pin_match" \
                 | awk -F: '{printf "%d\t%s\n", $1-1, substr($0, length($1)+2)}')$'\n'
         done

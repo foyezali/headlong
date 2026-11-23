@@ -329,6 +329,39 @@ else
     bad "invariant/max-bytes-finds-a-fitting-render" "$_big bytes at budget $_floor"
 fi
 
+# 10. A pin must survive rows that only MENTION the id. Retrieval reminders and
+#     reaction rows carry the step they point at (trigger_step, reply_to), so a
+#     raw substring scan spends its line cap on mentions and never loads the
+#     step's own row. Observed live: pin silently absent from the render.
+CP="$WORK_BK/pinmentions"
+mkdir -p "$CP/cp"
+python3 - "$CP/cp/trajectory.jsonl" <<'PYEOF'
+import json, sys
+rows = [{"type": "prompt", "content": "PROMPT", "step_id": "c-000"}]
+for i in range(60):
+    rows.append({"type": "observation", "content": "reminder", "step_id": "c-m%03d" % i,
+                 "trigger_step": "c-pin"})
+rows.append({"type": "observation", "content": "THE PINNED FACT", "step_id": "c-pin"})
+for i in range(40):
+    rows.append({"type": "reasoning", "content": "later %d" % i, "step_id": "c-l%03d" % i})
+open(sys.argv[1], "w").write("".join(json.dumps(r) + "\n" for r in rows))
+PYEOF
+cp_out=$("$CONTEXT" --traj_dir "$CP" cp --tail 2 --head 1 --pin c-pin --elision-style none 2>/dev/null)
+if printf '%s' "$cp_out" | grep -q 'THE PINNED FACT'; then
+    ok "pin/survives-rows-that-only-mention-the-id"
+else
+    bad "pin/survives-rows-that-only-mention-the-id" "pinned row absent"
+fi
+
+# 11. A pin that matches nothing says so. Silence here reads as "the step is in
+#     context" when it is not.
+cp_warn=$("$CONTEXT" --traj_dir "$CP" cp --tail 2 --head 1 --pin no-such-step 2>&1 >/dev/null)
+if printf '%s' "$cp_warn" | grep -q 'pinned step no-such-step not found'; then
+    ok "pin/not-found-warns-on-stderr"
+else
+    bad "pin/not-found-warns-on-stderr" "got: ${cp_warn:0:120}"
+fi
+
 # ---------------------------------------------------------------------------
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
