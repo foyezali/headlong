@@ -32,7 +32,17 @@ unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR \
 # it. When that directory is reaped mid-suite every `mktemp` path vanishes and
 # dozens of unrelated tests fail with "No such file or directory". Give the
 # tests a temp root the suite owns, and remove it on exit.
-SUITE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/headlong-suite.XXXXXX") || exit 1
+# ...but do not honor that TMPDIR as the *base*. If it points inside a shellm
+# run directory, planting the suite root there puts it in the one place
+# guaranteed to be deleted while the tests are still running. Anchor the root
+# in a real temp tree instead.
+tmp_base="${TMPDIR:-/tmp}"
+case "$tmp_base" in
+    */shellm-run.*|*/shellm-exec.*) tmp_base=/tmp ;;
+esac
+if [[ -n "${SHELLM_RUNDIR:-}" && "$tmp_base" == "${SHELLM_RUNDIR}"* ]]; then tmp_base=/tmp; fi
+[[ -d "$tmp_base" && -w "$tmp_base" ]] || tmp_base=/tmp
+SUITE_TMP=$(mktemp -d "$tmp_base/headlong-suite.XXXXXX") || exit 1
 export TMPDIR="$SUITE_TMP"
 trap 'rm -rf "$SUITE_TMP"' EXIT
 
