@@ -242,3 +242,29 @@ def test_other_failures_still_retry_and_post_the_error(bridge, monkeypatch):
     ib._handle(dm(7, "great"))
     assert len(calls) == inbound_mod.DELIVERY_ATTEMPTS
     assert bot.sent == [(7, inbound_mod.DELIVERY_ERROR_TEXT)]
+
+
+def test_admin_is_told_when_an_approve_cannot_be_saved(bridge):
+    """The poll loop swallows handler exceptions, so a failed save would leave
+    the admin believing a stranger was approved (or denied) when nothing was
+    written."""
+    ib, bot, posts = bridge
+    state = ib.cfg.state_dir
+    (state / "allowlist.json").unlink(missing_ok=True)
+    (state / "allowlist.json").mkdir()  # every save now raises
+    ib._handle(dm(ADMIN, "/approve 7"))
+    admin_replies = [t for c, t in bot.sent if c == ADMIN]
+    assert len(admin_replies) == 1
+    assert "FAILED" in admin_replies[0]
+    assert "approved 7" not in admin_replies[0]
+    # and the approval did not silently stick in memory
+    assert not ib.allowlist.is_approved(7)
+    # the sender was NOT told they were approved
+    assert not [t for c, t in bot.sent if c == 7]
+
+
+def test_admin_is_told_when_a_deny_cannot_be_saved(bridge):
+    ib, bot, posts = bridge
+    (ib.cfg.state_dir / "allowlist.json").mkdir()
+    ib._handle(dm(ADMIN, "/deny 13"))
+    assert "FAILED" in [t for c, t in bot.sent if c == ADMIN][0]

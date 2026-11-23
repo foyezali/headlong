@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from . import naming, tgfmt
-from .allowlist import Allowlist
+from .allowlist import Allowlist, AllowlistError
 from .api import ApiError, Bot
 from .config import Config
 from .state import Offset
@@ -139,26 +139,41 @@ class Inbound:
                 reply = f"usage: {command} <numeric user id>"
             else:
                 target = int(parts[1])
-                if command == "/approve":
-                    self.allowlist.approve(target)
-                    reply = f"approved {target}"
-                    try:
-                        # DM chat id == user id; fails harmlessly until the
-                        # user has started the bot.
-                        self.bot.send_message(
-                            target, "You're approved — say hi and I'll pass it on."
-                        )
-                    except ApiError:
-                        pass
-                elif command == "/deny":
-                    self.allowlist.deny(target)
-                    reply = f"denied {target} (silenced for good)"
-                else:
+                try:
+                    if command == "/approve":
+                        self.allowlist.approve(target)
+                    elif command == "/deny":
+                        self.allowlist.deny(target)
+                    else:
+                        revoked = self.allowlist.revoke(target)
+                except AllowlistError:
+                    # The change was rolled back. Saying "approved" here is how
+                    # an admin ends up certain a stranger is locked out when the
+                    # next restart lets them back in.
+                    log.exception("allowlist update failed for %s %s", command, target)
                     reply = (
-                        f"revoked {target}"
-                        if self.allowlist.revoke(target)
-                        else f"{target} wasn't approved"
+                        f"{command} {target} FAILED: the allowlist could not be "
+                        "written (check the bridge state dir), so nothing changed"
                     )
+                else:
+                    if command == "/approve":
+                        reply = f"approved {target}"
+                        try:
+                            # DM chat id == user id; fails harmlessly until the
+                            # user has started the bot.
+                            self.bot.send_message(
+                                target, "You're approved — say hi and I'll pass it on."
+                            )
+                        except ApiError:
+                            pass
+                    elif command == "/deny":
+                        reply = f"denied {target} (silenced for good)"
+                    else:
+                        reply = (
+                            f"revoked {target}"
+                            if revoked
+                            else f"{target} wasn't approved"
+                        )
         elif command == "/list":
             reply = self.allowlist.summary()
         self.bot.send_message(self.cfg.admin_id, reply)

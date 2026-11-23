@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from . import config, outbound
-from .allowlist import Allowlist
+from .allowlist import Allowlist, AllowlistError
 from .api import Bot
 from .inbound import Inbound
 
@@ -73,7 +73,17 @@ def main() -> None:
 
     allowlist = Allowlist(cfg.state_dir / "allowlist.json")
     if not allowlist.is_approved(cfg.admin_id):
-        allowlist.approve(cfg.admin_id, "admin")
+        try:
+            allowlist.approve(cfg.admin_id, "admin")
+        except AllowlistError as exc:
+            # Without this the process dies on a bare traceback before it can
+            # poll, which looks like "the bot is down" instead of "the state
+            # dir is not writable".
+            raise SystemExit(
+                f"headlong-telegram-bridge: the admin ({cfg.admin_id}) is not in "
+                f"the allowlist and it could not be written: {exc}. Fix the "
+                f"permissions on {cfg.state_dir} (owned by the bridge user)."
+            )
     stop_event = threading.Event()
     outbound.start(cfg, bot, allowlist, stop_event)
     try:
