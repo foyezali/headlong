@@ -26,6 +26,16 @@ unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR \
       TRAJ_ID TRAJ_DIR ROOT_TRAJ_ID SHELLM_TRAJ_DIR _SHELLM_PARENT_TRAJ_ID \
       SHELLM_HOME SHELLM_CONF_DIR
 
+# TMPDIR is the same kind of caller leak: tests create their scratch with
+# `mktemp -d`, which honors TMPDIR, so a suite launched from a wrapper that
+# pointed TMPDIR at a run directory makes every test's work tree live inside
+# it. When that directory is reaped mid-suite every `mktemp` path vanishes and
+# dozens of unrelated tests fail with "No such file or directory". Give the
+# tests a temp root the suite owns, and remove it on exit.
+SUITE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/headlong-suite.XXXXXX") || exit 1
+export TMPDIR="$SUITE_TMP"
+trap 'rm -rf "$SUITE_TMP"' EXIT
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 pattern="${1:-}"
 
