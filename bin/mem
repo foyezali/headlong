@@ -716,26 +716,51 @@ action_edit() {
     id=$(frontmatter_field "$file" "id")
     until=$(frontmatter_field "$file" "until")
 
-    # Build updated: field — collect existing entries and append new one
-    local updated_block=""
-    local existing_updated
-    existing_updated=$(awk 'BEGIN{n=0} /^---$/{n++; next} n==1' "$file" | grep "^updated:" | sed 's/^updated:[[:space:]]*//' || true)
-    local existing_list
-    # Same reason: only the first block is the header.
-    existing_list=$(awk 'BEGIN{n=0} /^---$/{n++; next} n==1' "$file" | grep "^  - " || true)
+    # Rebuild the header without destroying fields this function does not own.
+    # Before 2026-11-23 the rebuild emitted only id/summary/type/created/until/
+    # schedule/tz/updated, so any other key was silently deleted on edit: the
+    # resolution links design/unified_progressive_resolution_memory.md adds
+    # (level, parent, children, related, source_range) all vanished, and a
+    # hand-added list was worse than deleted -- `grep "^  - "` over the whole
+    # header folded its items into updated:, so a `related:` list became fake
+    # edit timestamps. The doc promises existing entries keep working; a key
+    # nobody wrote code for has to survive on its own.
+    local -a _hdr=() _preserved=()
+    local _line _key _block _j
+    while IFS= read -r _line; do _hdr+=("$_line"); done < <(
+        awk 'BEGIN{n=0} /^---$/{n++; next} n==1' "$file")
+    local updated_block="" _upd_list="" _upd_val=""
+    local _i=0
+    while [[ $_i -lt ${#_hdr[@]} ]]; do
+        _line="${_hdr[$_i]}"
+        _i=$((_i+1))
+        [[ -z "${_line//[[:space:]]/}" ]] && continue
+        _key="${_line%%:*}"
+        _block="$_line"
+        # A block is a key line plus its indented continuation lines.
+        while [[ $_i -lt ${#_hdr[@]} && "${_hdr[$_i]}" == [[:space:]]* ]]; do
+            _block="${_block}"$'\n'"${_hdr[$_i]}"
+            _i=$((_i+1))
+        done
+        case "$_key" in
+            id|summary|type|created|until|schedule|tz) ;;
+            updated)
+                _upd_val=$(printf '%s' "$_block" | sed -n '1s/^updated:[[:space:]]*//p')
+                _upd_list=$(printf '%s\n' "$_block" | sed '1d' | grep '^[[:space:]]*-' || true)
+                ;;
+            *) _preserved+=("$_block") ;;
+        esac
+    done
 
-    if [[ -n "$existing_list" ]]; then
-        # Already a list — append
-        updated_block=$(printf 'updated:\n%s\n  - %s' "$existing_list" "$now")
-    elif [[ -n "$existing_updated" ]]; then
-        # Single value — convert to list
-        updated_block=$(printf 'updated:\n  - %s\n  - %s' "$existing_updated" "$now")
+    # Build updated: field — collect existing entries and append new one
+    if [[ -n "$_upd_list" ]]; then
+        updated_block=$(printf 'updated:\n%s\n  - %s' "$_upd_list" "$now")
+    elif [[ -n "$_upd_val" ]]; then
+        updated_block=$(printf 'updated:\n  - %s\n  - %s' "$_upd_val" "$now")
     else
-        # No updated field yet
         updated_block=$(printf 'updated: %s' "$now")
     fi
 
-    # Reconstruct the file (preserve id and until if present)
     local id_line="" until_line=""
     [[ -n "$id" ]] && id_line="id: $id
 "
@@ -746,13 +771,18 @@ action_edit() {
         [[ -n "$_v" ]] && until_line="${until_line}$_k: $_v
 "
     done
+    local preserved_block=""
+    for _block in ${_preserved[@]+"${_preserved[@]}"}; do
+        preserved_block="${preserved_block}${_block}
+"
+    done
 
     cat > "$file" << EOF
 ---
 ${id_line}summary: $summary
 type: $type
 created: $created
-${until_line}$updated_block
+${preserved_block}${until_line}$updated_block
 ---
 
 $text
