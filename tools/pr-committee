@@ -58,17 +58,21 @@ MAX_FILES_BYTES="${PRC_MAX_FILES_BYTES:-250000}"
 
 die() { echo "pr-committee: $*" >&2; exit 1; }
 
+# need_val OPT VALUE: the value for OPT, or a message naming OPT. Bash's own
+# ${2:?} reports an empty value as a line number, which names nothing.
+need_val() { [[ -n "${2-}" ]] || die "$1 requires a value"; printf '%s' "$2"; }
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --diff)    DIFF_RANGE="${2:?--diff requires a git range}"; shift 2 ;;
-        --focus)   FOCUS="${2:?--focus requires a value}"; shift 2 ;;
-        --models)  MODELS="${2:?--models requires a value}"; shift 2 ;;
-        --chair)   CHAIR="${2:?--chair requires a value}"; shift 2 ;;
+        --diff)    DIFF_RANGE=$(need_val "$1" "${2-}"); shift 2 ;;
+        --focus)   FOCUS=$(need_val "$1" "${2-}"); shift 2 ;;
+        --models)  MODELS=$(need_val "$1" "${2-}"); shift 2 ;;
+        --chair)   CHAIR=$(need_val "$1" "${2-}"); shift 2 ;;
         --debate)  DEBATE=1; shift ;;
         --post)    POST=1; shift ;;
         --dry-run) DRY=1; shift ;;
-        --out)     OUT="${2:?--out requires a value}"; shift 2 ;;
-        -h|--help) sed -n '4,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --out)     OUT=$(need_val "$1" "${2-}"); shift 2 ;;
+        -h|--help) sed -n '4,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*)        die "unknown option: $1" ;;
         *)         PR="$1"; shift ;;
     esac
@@ -273,7 +277,17 @@ EOF
 # Round 1: independent parallel reviews
 # ---------------------------------------------------------------------------
 
-IFS=',' read -r -a ROSTER <<< "$MODELS"
+ROSTER=()
+IFS=',' read -r -a _raw_roster <<< "$MODELS"
+for _m in "${_raw_roster[@]}"; do
+    _m="${_m#"${_m%%[![:space:]]*}"}"
+    _m="${_m%"${_m##*[![:space:]]}"}"
+    [[ -n "$_m" ]] || continue
+    ROSTER+=("$_m")
+done
+# An empty --models / PRC_MODELS used to become one reviewer with a blank name
+# (in-1-.md, an empty -m for bin/llm) that then "succeeded" doing nothing.
+(( ${#ROSTER[@]} > 0 )) || die "no reviewer models: --models / PRC_MODELS is empty or blank"
 safe() { echo "${1//[\/:]/-}"; }
 
 run_round() {  # $1=round label; stdin arrives per-model from $2-template files
@@ -288,12 +302,18 @@ run_round() {  # $1=round label; stdin arrives per-model from $2-template files
               < "$in" > "$out" 2> "$err" ) &
         pids+=($!)
     done
-    local ok=0 i=0
+    local ok=0 i=0 rfile
     for model in "${ROSTER[@]}"; do
-        if wait "${pids[$i]}"; then
+        rfile="$OUT/review-$round-$(safe "$model").md"
+        if ! wait "${pids[$i]}"; then
+            echo "   ✗ $model failed (see err-$round-$(safe "$model").log)" >&2
+        elif [[ -s "$rfile" ]] && grep -q '[^[:space:]]' "$rfile"; then
             ok=$((ok+1)); echo "   ✓ $model"
         else
-            echo "   ✗ $model failed (see err-$round-$(safe "$model").log)" >&2
+            # Exit 0 with nothing on stdout is not a review. bin/llm can return
+            # an empty completion, and counting that as success let a whole run
+            # produce a "committee report" made of nothing.
+            echo "   ✗ $model returned no review (exit 0, empty output)" >&2
         fi
         i=$((i+1))
     done
@@ -396,6 +416,13 @@ EOF
 
 llm -m "$CHAIR" --no-stream --system-prompt-file "$OUT/sys-chair.txt" \
     < "$OUT/in-chair.md" > "$OUT/report.md"
+
+# A chair that exits 0 with nothing would otherwise have the footer appended to
+# an empty file and be printed as the report: a review that contains no
+# findings and reads like a pass. Refuse it instead.
+if ! [[ -s "$OUT/report.md" ]] || ! grep -q '[^[:space:]]' "$OUT/report.md"; then
+    die "chair ($CHAIR) returned no report; the brief is at $OUT/in-chair.md, re-run with --chair"
+fi
 
 {
     echo
