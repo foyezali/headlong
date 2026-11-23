@@ -89,7 +89,7 @@ The container flow the installer offers is this, and you can also run it
 yourself:
 
 ```bash
-docker run -it --name headlong --restart unless-stopped -p 8080:8080 \
+docker run -it --init --name headlong --restart unless-stopped -p 8080:8080 \
   --add-host host.docker.internal:host-gateway buildpack-deps:curl \
   bash -c 'curl -fsSL https://headlong.ai/install.sh | bash; exec bash'
 ```

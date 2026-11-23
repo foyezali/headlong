@@ -99,7 +99,7 @@ installer apt-installs its own dependencies (as root in a fresh
 container) and the dashboard binds `0.0.0.0` so the published port works.
 
 ```bash
-docker run -it --name headlong --restart unless-stopped -p 8080:8080 \
+docker run -it --init --name headlong --restart unless-stopped -p 8080:8080 \
   --add-host host.docker.internal:host-gateway buildpack-deps:curl \
   bash -c 'curl -fsSL https://headlong.ai/install.sh | bash; exec bash'
 ```

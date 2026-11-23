@@ -280,7 +280,7 @@ EOF
     echo "    docker exec -it headlong bash -l"
     echo
     local rc=0
-    docker run -it --name headlong --restart unless-stopped -p 8080:8080 \
+    docker run -it --init --name headlong --restart unless-stopped -p 8080:8080 \
         --add-host "host.docker.internal:host-gateway" \
         ${fwd[@]+"${fwd[@]}"} buildpack-deps:curl \
         bash -c 'curl -fsSL https://headlong.ai/install.sh | bash; exec bash' </dev/tty || rc=$?
