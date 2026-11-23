@@ -15,6 +15,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"
 PATH="$REPO/bin:$PATH"
 
+# alive PID: still running, not merely still in the process table. A child
+# of this shell that has exited is reaped by bash, but a dispatcher started
+# through a wrapper can be reparented and stay a zombie on a host whose PID 1
+# never reaps (this container runs `sleep` as init), where `kill -0` succeeds
+# forever. The state letter in /proc/<pid>/stat is the real answer.
+alive() {
+    local stat
+    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    stat=${stat##*) }
+    [[ "${stat%% *}" != Z ]]
+}
+
 pass=0
 fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -316,7 +328,7 @@ test_singleton_token() {
 
     local pid
     pid=$(cat "$TMP/id/run/dispatcher.pid" 2>/dev/null)
-    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    if [[ -z "$pid" ]] || ! alive "$pid"; then
         bad "singleton: dispatcher running before token steal"
         stop_thinkers
         return
@@ -326,10 +338,10 @@ test_singleton_token() {
     printf 'stolen-token' > "$TMP/id/run/dispatcher.token"
 
     local i=0
-    while kill -0 "$pid" 2>/dev/null && [[ "$i" -lt 5 ]]; do
+    while alive "$pid" && [[ "$i" -lt 5 ]]; do
         sleep 1; i=$((i+1))
     done
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if ! alive "$pid"; then
         ok "dispatcher exits after losing ownership token"
     else
         bad "dispatcher exits after losing ownership token" "still alive after 5s"

@@ -24,6 +24,20 @@ bad() { fail=$((fail+1)); printf 'FAIL %s%s\n' "$1" "${2:+ — $2}"; }
 check() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$label"; else bad "$label"; fi; }
 check_not() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$label"; else ok "$label"; fi; }
 
+# alive PID: still running, not merely still in the process table. Under a
+# PID 1 that never reaps orphans (this Docker host runs `sleep` as init) a
+# child that has already exited stays a zombie, and `kill -0` succeeds on a
+# zombie forever. The state letter in /proc/<pid>/stat is the real answer.
+alive() {
+    local stat
+    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    stat=${stat##*) }
+    [[ "${stat%% *}" != Z ]]
+}
+not_alive() { ! alive "$1"; }
+both_alive() { alive "$1" && alive "$2"; }
+both_dead() { not_alive "$1" && not_alive "$2"; }
+
 # wait_until <seconds> <command...>
 wait_until() {
     local deadline=$(( $(date +%s) + $1 )); shift
@@ -76,10 +90,10 @@ elapsed=$(( $(date +%s) - start ))
 check "stop returns immediately (took ${elapsed}s)" test "$elapsed" -le 2
 check "alpha removed from active_thinkers" bash -c "! grep -qx alpha '$RUN/active_thinkers'"
 check "beta still active" grep -qx beta "$RUN/active_thinkers"
-check "in-flight step still alive (draining)" kill -0 "$PID_A"
+check "in-flight step still alive (draining)" alive "$PID_A"
 check_not "stop script not run yet" test -f "$WORK/alpha.stop-ran"
 
-check "step finishes naturally" wait_until 6 bash -c "! kill -0 $PID_A"
+check "step finishes naturally" wait_until 6 not_alive "$PID_A"
 check "reaper ran stop script after drain" wait_until 6 test -f "$WORK/alpha.stop-ran"
 
 # ---------------------------------------------------------------------------
@@ -92,7 +106,7 @@ printf 'alpha\nbeta\n' > "$RUN/active_thinkers"
 PID_A=$(spawn_step alpha 60)
 
 env_thinkers stop --force alpha >/dev/null 2>&1
-check "force kills step quickly" wait_until 3 bash -c "! kill -0 $PID_A"
+check "force kills step quickly" wait_until 3 not_alive "$PID_A"
 check "force runs stop script inline" test -f "$WORK/alpha.stop-ran"
 
 # ---------------------------------------------------------------------------
@@ -105,8 +119,8 @@ printf 'alpha\nbeta\n' > "$RUN/active_thinkers"
 PID_A=$(spawn_step alpha 120)
 
 env_thinkers stop --drain-timeout 2 alpha >/dev/null 2>&1
-check "step alive right after drain stop" kill -0 "$PID_A"
-check "timeout escalation kills the step" wait_until 10 bash -c "! kill -0 $PID_A"
+check "step alive right after drain stop" alive "$PID_A"
+check "timeout escalation kills the step" wait_until 10 not_alive "$PID_A"
 check "stop script runs after escalation" wait_until 6 test -f "$WORK/alpha.stop-ran"
 
 # ---------------------------------------------------------------------------
@@ -121,8 +135,8 @@ PID_B=$(spawn_step beta 3)
 
 env_thinkers stop >/dev/null 2>&1
 check "stop-all deactivates immediately" test ! -s "$RUN/active_thinkers" -o ! -f "$RUN/active_thinkers"
-check "both steps still alive (draining)" bash -c "kill -0 $PID_A && kill -0 $PID_B"
-check "steps drain out" wait_until 8 bash -c "! kill -0 $PID_A && ! kill -0 $PID_B"
+check "both steps still alive (draining)" both_alive "$PID_A" "$PID_B"
+check "steps drain out" wait_until 8 both_dead "$PID_A" "$PID_B"
 check "stop scripts ran for both" wait_until 6 bash -c "test -f '$WORK/alpha.stop-ran' && test -f '$WORK/beta.stop-ran'"
 check "step ledger cleared by reaper" wait_until 6 bash -c "test ! -f '$RUN/step_pids'"
 
@@ -136,7 +150,7 @@ printf 'alpha\nbeta\n' > "$RUN/active_thinkers"
 PID_A=$(spawn_step alpha 60)
 
 env_thinkers stop --force >/dev/null 2>&1
-check "force stop-all kills immediately" wait_until 4 bash -c "! kill -0 $PID_A"
+check "force stop-all kills immediately" wait_until 4 not_alive "$PID_A"
 check "force stop-all runs stop scripts" test -f "$WORK/alpha.stop-ran"
 check "force stop-all clears ledger" test ! -f "$RUN/step_pids"
 

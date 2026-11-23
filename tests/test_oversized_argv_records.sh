@@ -27,6 +27,17 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 export WORK
 
+# still_running PID: is it running, or just still in the process table?
+# `kill -0` succeeds on a zombie, and this box's PID 1 never reaps orphans
+# (a container with `sleep` as init), so a killed producer can look alive
+# forever. The state letter in /proc/<pid>/stat is the real answer.
+still_running() {
+    local stat
+    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    stat=${stat##*) }
+    [[ "${stat%% *}" != Z ]]
+}
+
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s%s\n' "$1" "${2:+ — $2}"; }
@@ -246,7 +257,7 @@ bash "$WORK/driver_docker.sh" > "$WORK/docker_cancel_out" 2>&1 &
 client=$!
 for ((i=0; i<100; i++)); do
     [[ -s "$WORK/docker_heartbeat" ]] && break
-    kill -0 "$client" 2>/dev/null || break
+    still_running "$client" || break
     sleep 0.05
 done
 kill "$client" 2>/dev/null || true
@@ -257,7 +268,7 @@ sleep 0.2
 after=$(wc -c 2>/dev/null < "$WORK/docker_heartbeat" || echo 0)
 script=$(cat "$WORK/docker_script" 2>/dev/null || echo missing)
 if [[ $rc -eq 143 && "$producer" -gt 1 && "$before" -gt 0 && "$before" -eq "$after" && ! -f "$WORK/docker_completed" && ! -f "$script" ]] \
-    && ! kill -0 "$producer" 2>/dev/null; then
+    && ! still_running "$producer"; then
     ok "Docker cancellation stops the large-code producer before returning"
 else
     bad "Docker cancellation stops the large-code producer before returning" "rc=$rc, pid=$producer, bytes=$before/$after"

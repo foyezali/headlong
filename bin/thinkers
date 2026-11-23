@@ -65,6 +65,25 @@ NO_SELF_TRIGGER=0
 die() { printf 'thinkers: error: %s\n' "$*" >&2; exit 1; }
 
 # Kill a process and all its descendants (depth-first).
+# Is this pid still RUNNING, or merely still in the process table? Under a
+# PID 1 that never reaps orphans (a container with `sleep` as init, which is
+# how this box runs) a child that exited stays a zombie, and `kill -0`
+# succeeds on a zombie forever. The state letter in /proc/<pid>/stat is the
+# real answer; hosts without /proc (macOS dev) fall back to kill -0. Bash
+# reaps its own background children, so a dispatcher's own steps are not
+# expected to linger as zombies, but a step reparented away from a stopped
+# dispatcher is, and the drain reaper must not wait on one.
+_pid_alive() {
+    local _pid="$1" _line=""
+    kill -0 "$_pid" 2>/dev/null || return 1
+    if [[ -r "/proc/$_pid/stat" ]]; then
+        read -r _line < "/proc/$_pid/stat" 2>/dev/null || return 0
+        _line="${_line##*') '}"   # skip pid and (comm); comm may hold ') '
+        [[ "${_line%% *}" == "Z" ]] && return 1
+    fi
+    return 0
+}
+
 _kill_tree() {
     local pid="$1" sig="${2:-TERM}"
     local child
@@ -173,7 +192,7 @@ debug() {
 _inside_own_dispatcher() {
     local run_dir="$1" dpid pid
     dpid=$(cat "$run_dir/dispatcher.pid" 2>/dev/null) || return 1
-    [[ -n "$dpid" ]] && kill -0 "$dpid" 2>/dev/null || return 1
+    [[ -n "$dpid" ]] && _pid_alive "$dpid" || return 1
     local my_cg their_cg
     my_cg=$(cat /proc/self/cgroup 2>/dev/null) || my_cg=""
     their_cg=$(cat "/proc/$dpid/cgroup" 2>/dev/null) || their_cg=""
@@ -290,7 +309,7 @@ _start_dispatcher() {
     if [[ -f "$pid_file" ]]; then
         local old_pid
         old_pid=$(cat "$pid_file" 2>/dev/null) || true
-        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+        if [[ -n "$old_pid" ]] && _pid_alive "$old_pid"; then
             die "Dispatcher already running (PID $old_pid). Use \`thinkers stop\` first."
         fi
         rm -f "$pid_file"
@@ -518,7 +537,7 @@ _start_dispatcher() {
             local _fpid _fino _fsize _ftraj _cino _csize _live="" _dead=""
             while IFS=$'\t' read -r _fpid _fino _fsize _ftraj; do
                 [[ -z "$_fpid" ]] && continue
-                if ! kill -0 "$_fpid" 2>/dev/null; then
+                if ! _pid_alive "$_fpid"; then
                     _dead="${_dead}${_ftraj}
 "
                     continue
@@ -668,18 +687,8 @@ _start_dispatcher() {
         # busy, so it never rescued). Pruning in the dispatcher shell bounds
         # the PID-reuse window to about one tick.
         _step_alive() {
-            local _pid="$1" _line=""
-            kill -0 "$_pid" 2>/dev/null || return 1
-            # Belt-and-braces only: bash reaps its own background children on
-            # SIGCHLD, so a persistent Z-state child of this dispatcher is
-            # not expected. Builtin read — this runs on the ~1s tick path,
-            # where a fork per tracked PID adds up.
-            if [[ -r "/proc/$_pid/stat" ]]; then
-                read -r _line < "/proc/$_pid/stat" 2>/dev/null || _line=""
-                _line="${_line##*') '}"   # skip pid and (comm); comm may hold ') '
-                [[ "${_line%% *}" == "Z" ]] && return 1
-            fi
-            return 0
+            # Builtin read only, no fork: this runs on the ~1s tick path.
+            _pid_alive "$1"
         }
 
         _prune_finished_steps() {
@@ -1442,7 +1451,7 @@ _stop_dispatcher() {
     if [[ -f "$pid_file" ]]; then
         local pid
         pid=$(cat "$pid_file" 2>/dev/null) || true
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if [[ -n "$pid" ]] && _pid_alive "$pid"; then
             printf 'Stopping dispatcher (PID %s)...\n' "$pid" >&2
             # Announce the stop so the dispatcher's TERM trap exits 0
             # (sanctioned) instead of 130 (unsanctioned — systemd would
@@ -1451,10 +1460,10 @@ _stop_dispatcher() {
             touch "$run_dir/deliberate_stop" 2>/dev/null || true
             kill -TERM "$pid" 2>/dev/null || true
             for _ in 1 2 3 4 5 6 7 8; do
-                kill -0 "$pid" 2>/dev/null || break
+                _pid_alive "$pid" || break
                 sleep 0.25
             done
-            if kill -0 "$pid" 2>/dev/null; then
+            if _pid_alive "$pid"; then
                 kill -KILL "$pid" 2>/dev/null || true
             fi
             printf 'Dispatcher stopped.\n' >&2
@@ -1608,7 +1617,7 @@ cmd_start() {
         if [[ -f "$pid_file" ]]; then
             local old_pid
             old_pid=$(cat "$pid_file" 2>/dev/null) || true
-            if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            if [[ -n "$old_pid" ]] && _pid_alive "$old_pid"; then
                 need_dispatcher=0
             fi
         fi
@@ -1691,16 +1700,16 @@ _wait_or_kill() {
     while :; do
         alive=0
         for p in "$@"; do
-            if kill -0 "$p" 2>/dev/null; then alive=1; break; fi
+            if _pid_alive "$p"; then alive=1; break; fi
         done
         [[ "$alive" -eq 0 ]] && return 0
         if [[ $(date +%s) -ge "$deadline" ]]; then
             for p in "$@"; do
-                if kill -0 "$p" 2>/dev/null; then _kill_tree "$p" TERM; fi
+                if _pid_alive "$p"; then _kill_tree "$p" TERM; fi
             done
             sleep 1
             for p in "$@"; do
-                if kill -0 "$p" 2>/dev/null; then _kill_tree "$p" KILL; fi
+                if _pid_alive "$p"; then _kill_tree "$p" KILL; fi
             done
             return 0
         fi
@@ -1796,7 +1805,7 @@ cmd_stop() {
             local pids=() step_pid _step_name
             if [[ -f "$run_dir/step_pids" ]]; then
                 while read -r step_pid _step_name; do
-                    if [[ "$_step_name" == "$name" && -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
+                    if [[ "$_step_name" == "$name" && -n "$step_pid" ]] && _pid_alive "$step_pid"; then
                         pids+=("$step_pid")
                     fi
                 done < "$run_dir/step_pids"
@@ -1840,7 +1849,7 @@ cmd_stop() {
     local all_pids=() step_pid _step_name
     if [[ -f "$step_pids_file" ]]; then
         while read -r step_pid _step_name; do
-            if [[ -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
+            if [[ -n "$step_pid" ]] && _pid_alive "$step_pid"; then
                 all_pids+=("$step_pid")
             fi
         done < "$step_pids_file"
@@ -1864,7 +1873,7 @@ cmd_stop() {
         # Give them a moment, then force-kill survivors
         sleep 1
         for p in "${all_pids[@]}"; do
-            if kill -0 "$p" 2>/dev/null; then
+            if _pid_alive "$p"; then
                 _kill_tree "$p" KILL
             fi
         done
@@ -1901,7 +1910,7 @@ cmd_status() {
     if [[ -f "$pid_file" ]]; then
         local pid
         pid=$(cat "$pid_file" 2>/dev/null) || true
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if [[ -n "$pid" ]] && _pid_alive "$pid"; then
             dispatcher_state="running (PID $pid)"
         fi
     fi
@@ -1918,7 +1927,7 @@ cmd_status() {
     if [[ -f "$step_pids_file" ]]; then
         local _sp _sn
         while read -r _sp _sn; do
-            if [[ -n "$_sp" ]] && kill -0 "$_sp" 2>/dev/null; then
+            if [[ -n "$_sp" ]] && _pid_alive "$_sp"; then
                 _active_steps="${_active_steps}${_active_steps:+ }${_sn}"
             fi
         done < "$step_pids_file"
@@ -1954,7 +1963,7 @@ cmd_status() {
         if [[ -f "$thinker_pid_file" ]]; then
             local tpid
             tpid=$(cat "$thinker_pid_file" 2>/dev/null) || true
-            if [[ -n "$tpid" ]] && kill -0 "$tpid" 2>/dev/null; then
+            if [[ -n "$tpid" ]] && _pid_alive "$tpid"; then
                 status="running (PID $tpid)"
             fi
         fi
