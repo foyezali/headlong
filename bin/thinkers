@@ -506,7 +506,16 @@ _start_dispatcher() {
         _spawn_feeder() {
             local _ftraj="$1"
             (
+                # A subshell inherits the dispatcher's traps. Without this
+                # line the inherited EXIT trap runs _cleanup_dispatcher
+                # INSIDE THE FEEDER whenever a feeder dies, deleting the live
+                # dispatcher's ownership token and fifo; the inherited TERM
+                # trap is worse, because _kill_tree of a feeder then runs the
+                # dispatcher's own signal handler inside the child. Either
+                # way the mind goes deaf mid-repair.
+                trap - EXIT INT TERM HUP
                 tail -n 0 -F "$_ftraj" 2>/dev/null | while IFS= read -r line; do
+                    trap - EXIT INT TERM HUP
                     printf '%s\t%s\n' "$_ftraj" "$line"
                 done > "$fifo"
             ) 3<&- 4>&- &

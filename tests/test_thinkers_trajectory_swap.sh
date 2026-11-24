@@ -123,7 +123,23 @@ test_swap_does_not_replay() {
 
     # The incident, verbatim: rewrite the file to a new inode.
     grep -v "no-such-marker" "$TRAJ" > "$TRAJ.clean" && mv "$TRAJ.clean" "$TRAJ"
-    sleep 4
+    # Wait for the tick to restart the feeder instead of sleeping a fixed
+    # 4s: a respawned feeder resumes at end of file, so a step appended
+    # while the restart is still pending is lost. Under load the 1s tick
+    # can land after 4s, which made this test report a lost step that was
+    # really just a step appended during repair (2026-11-23). The claim
+    # under test is "after the swap is handled, a live step still
+    # dispatches", so wait for the handling, not for the clock.
+    _respawned=0
+    for _i in $(seq 1 60); do
+        if grep -q 'respawning' "$RUN/logs/dispatcher.log" 2>/dev/null; then
+            _respawned=1; break
+        fi
+        sleep 0.5
+    done
+    if [[ "$_respawned" -ne 1 ]]; then
+        bad "dispatcher restarts the feeder after the swap" "no respawn logged in 30s"
+    fi
 
     append_line "$(step_line "live-2" "$(now)")"
     wait_for_record 2
